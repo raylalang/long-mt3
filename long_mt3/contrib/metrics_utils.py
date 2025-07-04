@@ -19,9 +19,9 @@ import functools
 
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple, TypeVar
 
-from contrib import event_codec
-from contrib import note_sequences
-from contrib import run_length_encoding
+from . import event_codec
+from . import note_sequences
+from . import run_length_encoding
 
 import note_seq
 import numpy as np

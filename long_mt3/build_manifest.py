@@ -100,8 +100,4 @@ if __name__ == "__main__":
 
     config_path = os.path.join(manifest_dir, "config.json")
     with open(config_path, "w") as f:
-        json.dump(
-            {"data_root": args.data_root, "ratios": args.ratios, "seed": args.seed},
-            f,
-            indent=2,
-        )
+        json.dump(vars(args), f, indent=2)

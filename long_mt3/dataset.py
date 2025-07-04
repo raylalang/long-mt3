@@ -1,9 +1,10 @@
 import torch
 from torch.utils.data import Dataset
-from note_seq import midi_file_to_note_sequence
+import note_seq
 from .contrib.spectrograms import compute_spectrogram
 from .contrib.run_length_encoding import encode_and_index_events
 from .contrib.event_codec import Event
+from .contrib import note_sequences
 
 
 class MT3Dataset(Dataset):
@@ -55,8 +56,11 @@ class MT3Dataset(Dataset):
         return waveform.numpy().squeeze()
 
     def load_events(self, midi_path):
-        ns = midi_file_to_note_sequence(midi_path)
+        ns = note_seq.midi_file_to_note_sequence(midi_path)
         ns.notes.sort(key=lambda note: note.start_time)
+        note_sequences.validate_note_sequence(ns)
+        ns = note_sequences.trim_overlapping_notes(ns)
+
         event_times = [note.start_time for note in ns.notes]
         event_values = [(note.pitch, note.velocity) for note in ns.notes]
 

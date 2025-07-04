@@ -14,12 +14,47 @@
 #
 # Ported to PyTorch by Raynaldi Lalang, 2025.
 
+import dataclasses
 from typing import Sequence, Callable, Optional, Tuple, List, Any, TypeVar
 import numpy as np
 from . import event_codec
 
-ES = TypeVar("ES")  # Encoding State
-T = TypeVar("T")  # Event Type
+# These should be type variables, but unfortunately those are incompatible with
+# dataclasses.
+EventData = Any
+EncodingState = Any
+DecodingState = Any
+DecodeResult = Any
+
+T = TypeVar("T", bound=EventData)
+ES = TypeVar("ES", bound=EncodingState)
+DS = TypeVar("DS", bound=DecodingState)
+
+
+@dataclasses.dataclass
+class EventEncodingSpec:
+    """Spec for encoding events."""
+
+    # initialize encoding state
+    init_encoding_state_fn: Callable[[], EncodingState]
+    # convert EventData into zero or more events, updating encoding state
+    encode_event_fn: Callable[
+        [EncodingState, EventData, event_codec.Codec], Sequence[event_codec.Event]
+    ]
+    # convert encoding state (at beginning of segment) into events
+    encoding_state_to_events_fn: Optional[
+        Callable[[EncodingState], Sequence[event_codec.Event]]
+    ]
+    # create empty decoding state
+    init_decoding_state_fn: Callable[[], DecodingState]
+    # update decoding state when entering new segment
+    begin_decoding_segment_fn: Callable[[DecodingState], None]
+    # consume time and Event and update decoding state
+    decode_event_fn: Callable[
+        [DecodingState, float, event_codec.Event, event_codec.Codec], None
+    ]
+    # flush decoding state into result
+    flush_decoding_state_fn: Callable[[DecodingState], DecodeResult]
 
 
 def encode_and_index_events(

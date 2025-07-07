@@ -1,104 +1,41 @@
-import argparse
-import json
-import glob
-import os
-from tqdm import tqdm
-
-import torch
-from torch.utils.data import DataLoader
-import torch.nn as nn
-import torch.optim as optim
-
-from .dataset import MT3Dataset
-from .model import MT3Model
-from .contrib.spectrograms import SpectrogramConfig
+import hydra
+from omegaconf import DictConfig
+import pytorch_lightning as pl
+from .transcription import MT3Transcription
+from .data_pipeline import MT3DataPipeline
 from .vocabularies import build_codec, VocabularyConfig
+from .contrib.spectrograms import SpectrogramConfig
 
 
-def load_manifest(path):
-    with open(path) as f:
-        return [json.loads(line) for line in f]
+@hydra.main(config_path="config", config_name="config", version_base="1.2")
+def main(cfg: DictConfig):
+    vocab_config = VocabularyConfig()
+    codec = build_codec(vocab_config)
 
-
-def collate_fn(batch):
-    specs, tokens = zip(*batch)
-    spec_lens = [s.shape[0] for s in specs]
-    token_lens = [t.shape[0] for t in tokens]
-
-    max_spec = max(spec_lens)
-    max_token = max(token_lens)
-
-    padded_specs = torch.zeros(len(batch), max_spec, specs[0].shape[1])
-    padded_tokens = torch.full((len(batch), max_token), fill_value=0, dtype=torch.long)
-
-    for i in range(len(batch)):
-        padded_specs[i, : spec_lens[i]] = specs[i]
-        padded_tokens[i, : token_lens[i]] = tokens[i]
-
-    return padded_specs, padded_tokens
-
-
-def main(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    if args.manifest == "debug":
-        folders = sorted(glob.glob("manifests/debug_*"))
-        assert folders, "No debug_* folders found."
-        manifest_path = os.path.join(folders[-1], "train.jsonl")
-    else:
-        manifest_path = args.manifest
-
-    manifest = load_manifest(manifest_path)
-    codec = build_codec(VocabularyConfig())
-    spec_config = SpectrogramConfig()
-
-    dataset = MT3Dataset(manifest, spec_config, codec)
-    loader = DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn
+    spec_config = SpectrogramConfig(**cfg.data.spectrogram_config)
+    data_module = MT3DataPipeline(
+        data_list_path=cfg.data.data_list_path,
+        spectrogram_config=spec_config,
+        codec=codec,
+        batch_size=cfg.data.batch_size,
+        num_workers=cfg.data.num_workers,
     )
 
-    model = MT3Model(
-        input_dim=spec_config.n_mels,
-        vocab_size=codec.num_classes,
-        d_model=args.d_model,
-        n_layers=args.n_layers,
-        n_heads=args.n_heads,
-        dropout=args.dropout,
-    ).to(device)
+    model_config = {
+        "input_dim": cfg.model.input_dim,
+        "vocab_size": codec.num_classes,
+        "n_layers": cfg.model.n_layers,
+        "n_heads": cfg.model.n_heads,
+        "d_model": cfg.model.d_model,
+        "dropout": cfg.model.dropout,
+    }
 
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-
-    for epoch in range(args.epochs):
-        model.train()
-        total_loss = 0
-        for specs, tokens in tqdm(loader):
-            specs = specs.to(device)
-            tokens = tokens.to(device)
-
-            optimizer.zero_grad()
-            output = model(specs, tokens[:, :-1])
-            loss = criterion(
-                output.reshape(-1, output.shape[-1]),
-                tokens[:, 1:].reshape(-1),
-            )
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-
-        print(f"Epoch {epoch+1}, Loss: {total_loss / len(loader):.4f}")
+    model = MT3Transcription(
+        model_config=model_config, learning_rate=cfg.train.learning_rate
+    )
+    trainer = pl.Trainer(max_epochs=cfg.train.max_epochs)
+    trainer.fit(model, datamodule=data_module)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=str, default="debug")
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--d_model", type=int, default=512)
-    parser.add_argument("--n_layers", type=int, default=8)
-    parser.add_argument("--n_heads", type=int, default=8)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--epochs", type=int, default=1)
-
-    args = parser.parse_args()
-    main(args)
+    main()

@@ -127,17 +127,3 @@ def input_depth(config: SpectrogramConfig) -> int:
     return config.n_mels
 
 
-if __name__ == "__main__":
-    import os
-
-    print("Debugging spectrograms...")
-    path = "babyslakh_16k/Track00001/mix.wav"
-    assert os.path.exists(path)
-    waveform, sr = torchaudio.load(path)
-    assert sr == 16000
-
-    config = SpectrogramConfig()
-    spec = compute_spectrogram(waveform.numpy()[0], config)
-    print("Spectrogram shape:", spec.shape)
-    assert spec.ndim == 2 and spec.shape[1] == config.n_mels
-    print("spectrograms debug passed.")

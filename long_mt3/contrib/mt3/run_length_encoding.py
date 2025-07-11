@@ -183,16 +183,3 @@ def decode_events(
     return [decode_event_fn(ev) for ev in encoded_events]
 
 
-if __name__ == "__main__":
-    print("Debugging run_length_encoding...")
-
-    shift_token = 1
-    sequence = [60, 60, shift_token, shift_token, shift_token, 62, shift_token]
-    rle = run_length_encode_shifts(sequence, shift_token)
-    print("run_length_encoding result:", rle)
-
-    # Just check format
-    for token, run in rle:
-        assert isinstance(token, int)
-        assert isinstance(run, int) and run >= 1
-    print("run_length_encoding debug passed.")

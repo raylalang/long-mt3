@@ -1,10 +1,10 @@
 import torch
 from torch.utils.data import Dataset
 import note_seq
-from .contrib.spectrograms import compute_spectrogram
-from .contrib.run_length_encoding import encode_and_index_events
-from .contrib.event_codec import Event
-from .contrib import note_sequences
+from .spectrograms import compute_spectrogram
+from .run_length_encoding import encode_and_index_events
+from .event_codec import Event
+from . import note_sequences
 
 
 class MT3Dataset(Dataset):
@@ -44,7 +44,6 @@ class MT3Dataset(Dataset):
         return spec, event_ids
 
     def load_audio(self, path):
-        # Replace with your favorite audio loader, e.g. torchaudio or librosa
         import torchaudio
 
         waveform, sr = torchaudio.load(path)
@@ -52,7 +51,6 @@ class MT3Dataset(Dataset):
             waveform = torchaudio.functional.resample(
                 waveform, sr, self.spectrogram_config.sample_rate
             )
-        # Convert to numpy if needed by compute_spectrogram
         return waveform.numpy().squeeze()
 
     def load_events(self, midi_path):
@@ -84,28 +82,3 @@ class MT3Dataset(Dataset):
 
         return events
 
-
-if __name__ == "__main__":
-    import os
-    import glob
-    import json
-    from .contrib.spectrograms import SpectrogramConfig
-    from .vocabularies import build_codec, VocabularyConfig
-
-    # Find latest debug_* manifest folder
-    folders = sorted(glob.glob("manifests/debug_*"))
-    assert folders, "No debug_* folders found in manifests/"
-    latest = folders[-1]
-    manifest_path = os.path.join(latest, "train.jsonl")
-
-    with open(manifest_path) as f:
-        manifest = [json.loads(line) for line in f]
-
-    codec = build_codec(VocabularyConfig())
-    dataset = MT3Dataset(manifest, SpectrogramConfig(), codec)
-    spec, tokens = dataset[0]
-
-    print("Loaded from:", manifest_path)
-    print("Spectrogram shape:", spec.shape)
-    print("Token shape:", tokens.shape)
-    print("First few tokens:", tokens[:10])

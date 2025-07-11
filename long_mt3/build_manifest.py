@@ -1,103 +1,155 @@
-from datetime import datetime
 import os
-import glob
 import json
+from pathlib import Path
+from datetime import datetime
+import hydra
+from omegaconf import DictConfig, OmegaConf
 import random
-import argparse
 
 
-def find_tracks(root):
-    return sorted(
-        [os.path.join(root, d) for d in os.listdir(root) if d.startswith("Track")]
-    )
+def parse_maestro(root):
+    # Structure: {year}/{name}.{wav,mid}
+    items = []
+    for midi_path in root.glob("*/*.mid"):
+        mix_audio_path = midi_path.with_suffix(".wav")
+        if mix_audio_path.exists():
+            items.append({
+                "mix_audio": str(mix_audio_path.resolve()),
+                "midi": str(midi_path.resolve())
+            })
+    return items
 
 
-def make_examples(track_path):
-    examples = []
-
-    # Mixture-level example
-    mix_wav = os.path.join(track_path, "mix.wav")
-    mix_mid = os.path.join(track_path, "all_src.mid")
-    if os.path.isfile(mix_wav) and os.path.isfile(mix_mid):
-        examples.append(
-            {
-                "audio_path": mix_wav,
-                "midi_path": mix_mid,
-                "track": os.path.basename(track_path),
-                "type": "mixture",
-            }
-        )
-
-    # Stem-level examples
-    stems_dir = os.path.join(track_path, "stems")
-    midi_dir = os.path.join(track_path, "MIDI")
-    if os.path.isdir(stems_dir) and os.path.isdir(midi_dir):
-        stem_wavs = sorted(glob.glob(os.path.join(stems_dir, "S*.wav")))
-        for wav_path in stem_wavs:
-            basename = os.path.splitext(os.path.basename(wav_path))[0]
-            midi_path = os.path.join(midi_dir, f"{basename}.mid")
-            if os.path.isfile(midi_path):
-                examples.append(
-                    {
-                        "audio_path": wav_path,
-                        "midi_path": midi_path,
-                        "track": os.path.basename(track_path),
-                        "stem": basename,
-                        "type": "stem",
-                    }
-                )
-    return examples
+def parse_urmp(root):
+    # Structure: {name}.{AuMix*.wav, *converted.mid}
+    items = []
+    for mix_audio_path in root.glob("*.AuMix*.wav"):
+        name = mix_audio_path.stem.split(".")[0]
+        midi_matches = list(root.glob(f"{name}.*converted.mid"))
+        if midi_matches:
+            items.append({
+                "mix_audio": str(mix_audio_path.resolve()),
+                "midi": str(midi_matches[0].resolve())
+            })
+    return items
 
 
-def split_examples(examples, ratios, seed=420):
-    random.Random(seed).shuffle(examples)
-    n = len(examples)
-    n_train = int(n * ratios[0])
-    n_val = int(n * ratios[1])
-    return (
-        examples[:n_train],
-        examples[n_train : n_train + n_val],
-        examples[n_train + n_val :],
-    )
+def parse_musicnet(root):
+    # Structure: {train/test}_{data/labels_midi}/{name}.{wav,mid}
+    result = {"train": [], "test": []}
+    for split in ["train", "test"]:
+        data_dir = root / f"{split}_data"
+        label_dir = root / f"{split}_labels_midi"
+        if not data_dir.exists() or not label_dir.exists():
+            continue
+        for mix_audio_path in data_dir.glob("*.wav"):
+            stem = mix_audio_path.stem
+            midi_path = label_dir / f"{stem}.mid"
+            if midi_path.exists():
+                result[split].append({
+                    "mix_audio": str(mix_audio_path.resolve()),
+                    "midi": str(midi_path.resolve())
+                })
+    return result
 
 
-def write_jsonl(filename, examples):
-    with open(filename, "w") as f:
-        for ex in examples:
-            f.write(json.dumps(ex) + "\n")
-    print(f"Wrote {len(examples)} entries to {filename}")
+def parse_slakh2100(root):
+    # Structure: {train/test/validation}/{name}/{mix.wav, all_src.mid}
+    result = {"train": [], "validation": [], "test": []}
+    for split in result.keys():
+        split_dir = root / split
+        if not split_dir.exists():
+            continue
+        for song_dir in split_dir.iterdir():
+            if not song_dir.is_dir():
+                continue
+            midi_path = song_dir / "all_src.mid"
+            mix_audio_path = song_dir / "mix.wav"
+            if mix_audio_path.exists() and midi_path.exists():
+                canonical = "validation" if split == "validation" else split
+                result[canonical].append({
+                    "mix_audio": str(mix_audio_path.resolve()),
+                    "midi": str(midi_path.resolve())
+                })
+    return result
 
 
-def build_manifest(data_root, output_dir, ratios, seed):
-    all_examples = []
-    for track_path in find_tracks(data_root):
-        all_examples.extend(make_examples(track_path))
+def split_items(items, ratios, seed):
+    random.Random(seed).shuffle(items)
+    n = len(items)
+    n_train = int(ratios[0] * n)
+    n_val = int(ratios[1] * n)
+    return {
+        "train": items[:n_train],
+        "validation": items[n_train:n_train + n_val],
+        "test": items[n_train + n_val:]
+    }
 
-    if "debug" in output_dir:
-        print(f"Debug mode: using only the first 10 examples from {len(all_examples)}")
-        all_examples = all_examples[:10]
 
-    train, val, test = split_examples(all_examples, ratios, seed)
+parsers = {
+    "maestro": parse_maestro,
+    "urmp": parse_urmp,
+    "musicnet": parse_musicnet,
+    "slakh2100": parse_slakh2100,
+}
 
-    os.makedirs(output_dir, exist_ok=True)
-    write_jsonl(os.path.join(output_dir, "train.jsonl"), train)
-    write_jsonl(os.path.join(output_dir, "val.jsonl"), val)
-    write_jsonl(os.path.join(output_dir, "test.jsonl"), test)
+
+def build_manifest(cfg):
+    manifest = {"train": [], "validation": [], "test": []}
+
+    # Aggregate datasets by usage (train/validation/test)
+    all_datasets = set()
+    for split in ["train", "validation", "test"]:
+        all_datasets.update(cfg.datasets.get(split, []))
+
+    for dataset_name in all_datasets:
+        if dataset_name not in parsers:
+            raise ValueError(f"Unsupported dataset: {dataset_name}")
+        root = Path(cfg.paths[dataset_name])
+        parsed = parsers[dataset_name](root)
+
+        if isinstance(parsed, list):  # unsplit dataset — do full split once
+            if dataset_name not in cfg.split:
+                raise ValueError(f"Missing split ratio for unsplit dataset '{dataset_name}'")
+            ratios = cfg.split[dataset_name]
+            split_result = split_items(parsed, ratios, cfg.seed)
+            for split in ["train", "validation", "test"]:
+                if dataset_name in cfg.datasets.get(split, []):
+                    manifest[split].extend(split_result[split])
+        elif isinstance(parsed, dict):  # pre-split dataset
+            for split in ["train", "validation", "test"]:
+                if dataset_name in cfg.datasets.get(split, []):
+                    if split in parsed:
+                        manifest[split].extend(parsed[split])
+                    else:
+                        print(f"Skipping {dataset_name} for '{split}' split (not available)")
+
+
+    return manifest
+
+
+@hydra.main(config_path="configs", config_name="build_manifest", version_base=None)
+def main(cfg: DictConfig):
+    manifest = build_manifest(cfg)
+
+    # Include config and datetime in output
+    output = {
+        "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "config": OmegaConf.to_container(cfg, resolve=True),
+        "manifest": manifest
+    }
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = Path("manifests") / f"manifest_{timestamp}.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "w") as f:
+        json.dump(output, f, indent=2)
+
+    print(f"Manifest written to: {output_path}")
+    for split in cfg.datasets:
+        print(f"  {split}: {len(manifest[split])} items")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, required=True)
-    parser.add_argument("--output_prefix", type=str, required=True)
-    parser.add_argument("--seed", type=int, default=420)
-    parser.add_argument("--ratios", nargs=3, type=float, default=[0.8, 0.1, 0.1])
-    args = parser.parse_args()
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    manifest_dir = os.path.join("manifests", f"{args.output_prefix}_{timestamp}")
-
-    build_manifest(args.data_root, manifest_dir, args.ratios, args.seed)
-
-    config_path = os.path.join(manifest_dir, "config.json")
-    with open(config_path, "w") as f:
-        json.dump(vars(args), f, indent=2)
+    main()

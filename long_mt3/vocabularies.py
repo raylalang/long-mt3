@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import note_seq
-from .contrib import event_codec
+from .contrib.mt3 import event_codec
 
 DEFAULT_STEPS_PER_SECOND = 100
 DEFAULT_MAX_SHIFT_SECONDS = 10

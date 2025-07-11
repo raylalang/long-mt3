@@ -1,6 +1,9 @@
 __pycache__
 .DS_Store
-debug-*
+debug*
 *.wav
-babyslakh_16k
-manifests
+*.mid
+data/
+manifests/
+logs/
+*.log

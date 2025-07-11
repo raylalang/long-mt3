@@ -1,0 +1,9 @@
+data:
+  spectrogram_config:
+    sample_rate: 16000
+    frame_width: 512
+    hop_width: 128
+    mel_bands: 229
+    use_log_mel: true
+  batch_size: 8
+  num_workers: 4

@@ -14,8 +14,9 @@ def parse_maestro(root):
         mix_audio_path = midi_path.with_suffix(".wav")
         if mix_audio_path.exists():
             items.append({
-                "mix_audio": str(mix_audio_path.resolve()),
-                "midi": str(midi_path.resolve())
+                "dataset": "maestro",
+                "mix_audio_path": str(mix_audio_path.resolve()),
+                "midi_path": str(midi_path.resolve())
             })
     return items
 
@@ -28,8 +29,9 @@ def parse_urmp(root):
         midi_matches = list(root.glob(f"{name}.*converted.mid"))
         if midi_matches:
             items.append({
-                "mix_audio": str(mix_audio_path.resolve()),
-                "midi": str(midi_matches[0].resolve())
+                "dataset": "urmp",
+                "mix_audio_path": str(mix_audio_path.resolve()),
+                "midi_path": str(midi_matches[0].resolve())
             })
     return items
 
@@ -47,8 +49,9 @@ def parse_musicnet(root):
             midi_path = label_dir / f"{stem}.mid"
             if midi_path.exists():
                 result[split].append({
-                    "mix_audio": str(mix_audio_path.resolve()),
-                    "midi": str(midi_path.resolve())
+                    "dataset": "musicnet",
+                    "mix_audio_path": str(mix_audio_path.resolve()),
+                    "midi_path": str(midi_path.resolve())
                 })
     return result
 
@@ -68,8 +71,9 @@ def parse_slakh2100(root):
             if mix_audio_path.exists() and midi_path.exists():
                 canonical = "validation" if split == "validation" else split
                 result[canonical].append({
-                    "mix_audio": str(mix_audio_path.resolve()),
-                    "midi": str(midi_path.resolve())
+                    "dataset": "slakh2100",
+                    "mix_audio_path": str(mix_audio_path.resolve()),
+                    "midi_path": str(midi_path.resolve())
                 })
     return result
 

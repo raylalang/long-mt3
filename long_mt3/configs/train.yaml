@@ -1,4 +1,8 @@
 train:
   learning_rate: 1e-4
-  max_epochs: 100
-  fp16: true
+  max_epochs: 2
+  precision: "16-mixed"
+
+  accelerator: gpu
+  devices: [0]
+  strategy: "auto"

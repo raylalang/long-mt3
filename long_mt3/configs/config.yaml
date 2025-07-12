@@ -1,4 +1,8 @@
 defaults:
-  - data: data
-  - model: model
-  - train: train
+  - data
+  - model
+  - train
+
+hydra:
+  run:
+    dir: logs/train/${now:%Y-%m-%d_%H-%M-%S}

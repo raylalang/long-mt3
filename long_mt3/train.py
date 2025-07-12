@@ -2,11 +2,13 @@ import hydra
 from omegaconf import DictConfig
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
+import torch
+import torch.nn as nn
 
-from .model import MT3Transcription
+from .model import MT3Model
 from .data_pipeline import MT3DataPipeline
 from .vocabularies import build_codec, VocabularyConfig
-from .spectrograms import SpectrogramConfig
+from .contrib.mt3.spectrograms import SpectrogramConfig
 
 
 class MT3Trainer(pl.LightningModule):
@@ -20,12 +22,21 @@ class MT3Trainer(pl.LightningModule):
         return self.model(src, tgt)
 
     def training_step(self, batch, batch_idx):
-        src, tgt = batch  # (B, T_spec), (B, T_tgt)
+        src, tgt = batch
         logits = self(src, tgt[:, :-1])
         loss = self.loss_fn(
             logits.reshape(-1, logits.shape[-1]), tgt[:, 1:].reshape(-1)
         )
         self.log("train_loss", loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        src, tgt = batch
+        logits = self(src, tgt[:, :-1])
+        loss = self.loss_fn(
+            logits.reshape(-1, logits.shape[-1]), tgt[:, 1:].reshape(-1)
+        )
+        self.log("val_loss", loss, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
@@ -39,15 +50,17 @@ def main(cfg: DictConfig):
 
     spec_config = SpectrogramConfig(**cfg.data.spectrogram_config)
     data_module = MT3DataPipeline(
-        data_list_path=cfg.data.data_list_path, # to edit
+        manifest_path=cfg.data.manifest_path,
         spectrogram_config=spec_config,
         codec=codec,
         batch_size=cfg.data.batch_size,
         num_workers=cfg.data.num_workers,
+        segment_seconds=cfg.data.segment_seconds,
+        temperature=cfg.data.temperature
     )
 
     model_config = {
-        "input_dim": cfg.model.input_dim,
+        "input_dim": spec_config.num_mel_bins,
         "vocab_size": codec.num_classes,
         "n_layers": cfg.model.n_layers,
         "n_heads": cfg.model.n_heads,
@@ -62,10 +75,10 @@ def main(cfg: DictConfig):
     checkpoint_callback = ModelCheckpoint(monitor="val_loss", save_top_k=1, mode="min")
     trainer = pl.Trainer(
         max_epochs=cfg.train.max_epochs,
-        accelerator='auto',
-        devices='auto',
-        strategy='ddp' if torch.cuda.device_count() > 1 else None,
-        precision=16 if cfg.train.get("fp16", False) else 32,
+        accelerator=cfg.train.accelerator,
+        devices=cfg.train.devices,
+        precision=cfg.train.precision,
+        strategy=cfg.train.strategy,
         callbacks=[checkpoint_callback],
         logger=True
     )

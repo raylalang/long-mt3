@@ -1,6 +1,5 @@
 model:
-  input_dim: 229
-  n_layers: 8
-  n_heads: 4
-  d_model: 512
+  n_layers: 4
+  n_heads: 8
+  d_model: 128
   dropout: 0.1

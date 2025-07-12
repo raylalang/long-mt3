@@ -6,4 +6,5 @@ debug*
 data/
 manifests/
 logs/
+lightning_logs/
 *.log

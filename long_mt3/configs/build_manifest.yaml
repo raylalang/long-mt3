@@ -1,17 +1,19 @@
 datasets:
-  train: ["maestro", "slakh2100", "musicnet", "urmp"]
-  validation: ["maestro", "slakh2100", "musicnet", "urmp"]
-  test: ["maestro", "slakh2100", "musicnet", "urmp"]
+  train: ["maestro", "slakh2100", "musicnet", "urmp", "guitarset"]
+  validation: ["maestro", "slakh2100", "musicnet", "urmp", "guitarset"]
+  test: ["maestro", "slakh2100", "musicnet", "urmp", "guitarset"]
 
 paths:
   maestro: ../../data/maestro_yourmt3_16k
   urmp: ../../data/urmp_yourmt3_16k
   musicnet: ../../data/musicnet_yourmt3_16k
   slakh2100: ../../data/slakh2100_yourmt3_16k
+  guitarset: ../../data/guitarset_yourmt3_16k
 
 split:
-  maestro: [0.85, 0.05, 0.1]
-  urmp: [0.85, 0.05, 0.1]
+  maestro: [0.88, 0.02, 0.1]
+  urmp: [0.88, 0.02, 0.1]
+  guitarset: [0.88, 0.02, 0.1]
 
 seed: 420
 

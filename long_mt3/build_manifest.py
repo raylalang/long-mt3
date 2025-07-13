@@ -37,7 +37,7 @@ def parse_urmp(root):
 
 
 def parse_musicnet(root):
-    # Structure: {train/test}_{data/labels_midi}/{name}.{wav,mid}
+    # Structure: {train, test}_{data, labels_midi}/{name}.{wav,mid}
     result = {"train": [], "test": []}
     for split in ["train", "test"]:
         data_dir = root / f"{split}_data"
@@ -57,7 +57,7 @@ def parse_musicnet(root):
 
 
 def parse_slakh2100(root):
-    # Structure: {train/test/validation}/{name}/{mix.wav, all_src.mid}
+    # Structure: {train, validation, test}/{name}/{mix.wav, all_src.mid}
     result = {"train": [], "validation": [], "test": []}
     for split in result.keys():
         split_dir = root / split
@@ -78,6 +78,27 @@ def parse_slakh2100(root):
     return result
 
 
+def parse_guitarset(root):
+    # Structure:    audio_mono-pickup_mix/{name}_mix.wav
+    #               annotation/{name}.mid
+    items = []
+    audio_dir = root / "audio_mono-pickup_mix"
+    midi_dir = root / "annotation"
+
+    for mix_audio_path in audio_dir.glob("*_mix.wav"):
+        name = mix_audio_path.stem.replace("_mix", "")
+        midi_path = midi_dir / f"{name}.mid"
+        if midi_path.exists():
+            items.append({
+                "dataset": "guitarset",
+                "mix_audio_path": str(mix_audio_path.resolve()),
+                "midi_path": str(midi_path.resolve())
+            })
+    return items
+
+
+
+
 def split_items(items, ratios, seed):
     random.Random(seed).shuffle(items)
     n = len(items)
@@ -95,6 +116,7 @@ parsers = {
     "urmp": parse_urmp,
     "musicnet": parse_musicnet,
     "slakh2100": parse_slakh2100,
+    "guitarset": parse_guitarset
 }
 
 

@@ -8,3 +8,5 @@ manifests/
 logs/
 lightning_logs/
 *.log
+checkpoints/
+*.ckpt

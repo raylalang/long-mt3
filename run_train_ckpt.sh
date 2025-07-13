@@ -1,0 +1,1 @@
+python3 -m long_mt3.train train.ckpt_path="lightning_logs/version_0/checkpoints/mt3-25.ckpt"

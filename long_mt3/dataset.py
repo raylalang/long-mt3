@@ -8,6 +8,7 @@ from .contrib.mt3.run_length_encoding import encode_and_index_events
 from .contrib.mt3.event_codec import Event
 from .contrib.mt3 import note_sequences
 
+MAX_LEN = 1024
 
 class MT3Dataset(Dataset):
     """
@@ -60,7 +61,7 @@ class MT3Dataset(Dataset):
 
         # Load + trim events
         events = self.load_events(sample["midi_path"], start_time, end_time)
-        event_ids = torch.tensor(events, dtype=torch.long)
+        event_ids = torch.tensor(events, dtype=torch.long)[:MAX_LEN]
 
         return spec, event_ids
 

@@ -5,7 +5,7 @@ import math
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=8192):
+    def __init__(self, d_model, max_len=1024):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
@@ -100,23 +100,3 @@ class MT3Model(nn.Module):
             memory_key_padding_mask=src_key_padding_mask,
         )
         return logits
-
-
-if __name__ == "__main__":
-    from .vocabularies import build_codec, VocabularyConfig
-
-    config = VocabularyConfig()
-    codec = build_codec(config)
-
-    batch_size = 2
-    frames = 1024
-    n_mels = 229
-    tgt_len = 128
-
-    dummy_src = torch.randn(batch_size, frames, n_mels)
-    dummy_tgt = torch.randint(0, codec.num_classes, (batch_size, tgt_len))
-
-    model = MT3Model(input_dim=n_mels, vocab_size=codec.num_classes)
-    logits = model(dummy_src, dummy_tgt)
-
-    print("Logits shape:", logits.shape)  # should be (2, 128, vocab_size)

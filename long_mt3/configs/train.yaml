@@ -1,8 +1,10 @@
 train:
   learning_rate: 1e-4
-  max_epochs: 2
+  max_epochs: 50
   precision: "16-mixed"
 
   accelerator: gpu
-  devices: [0]
-  strategy: "auto"
+  devices: [0,2,4,6]
+  strategy: auto
+
+  ckpt_path: null

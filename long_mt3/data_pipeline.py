@@ -25,23 +25,24 @@ class MT3DataPipeline(pl.LightningDataModule):
         self.num_workers = num_workers
         self.segment_seconds = segment_seconds
         self.temperature = temperature
+        self.dataset = {}
 
     def setup(self, stage=None):
         with open(self.manifest_path) as f:
             manifest = json.load(f)
 
-        dataset_map = defaultdict(list)
-        for split in manifest["manifest"]["train"]:
-            dataset_name = split["dataset"]
-            dataset_map[dataset_name].append(split)
-
-        self.dataset = MT3TemperatureSampler(
-            dataset_map=dataset_map,
-            spectrogram_config=self.spectrogram_config,
-            codec=self.codec,
-            segment_seconds=self.segment_seconds,
-            temperature=self.temperature,
-        )
+        for split in ["train", "validation"]:
+            dataset_map = defaultdict(list)
+            for sample in manifest["manifest"][split]:
+                dataset_name = sample["dataset"]
+                dataset_map[dataset_name].append(sample)
+            self.dataset[split] = MT3TemperatureSampler(
+                dataset_map=dataset_map,
+                spectrogram_config=self.spectrogram_config,
+                codec=self.codec,
+                segment_seconds=self.segment_seconds,
+                temperature=self.temperature,
+            )
 
     def collate_fn(self, batch):
         specs, tokens = zip(*batch)
@@ -63,9 +64,22 @@ class MT3DataPipeline(pl.LightningDataModule):
 
     def train_dataloader(self):
         return DataLoader(
-            self.dataset,
+            self.dataset["train"],
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
+            persistent_workers=True,
+            prefetch_factor=4
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.dataset["validation"],
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            collate_fn=self.collate_fn,
+            persistent_workers=True,
+            prefetch_factor=4
         )

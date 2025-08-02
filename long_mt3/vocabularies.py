@@ -1,10 +1,19 @@
 from dataclasses import dataclass
+import math
 import note_seq
+from typing import Optional
+
 from .contrib.mt3 import event_codec
 
+# Constants
 DEFAULT_STEPS_PER_SECOND = 100
 DEFAULT_MAX_SHIFT_SECONDS = 10
 DEFAULT_NUM_VELOCITY_BINS = 127
+
+PAD_TOKEN = 0
+EOS_TOKEN = 1
+UNK_TOKEN = 2
+NUM_SPECIAL_TOKENS = 3
 
 
 @dataclass
@@ -16,18 +25,40 @@ class VocabularyConfig:
 
 def build_codec(config: VocabularyConfig) -> event_codec.Codec:
     event_ranges = [
-        event_codec.EventRange(
-            "pitch", note_seq.MIN_MIDI_PITCH, note_seq.MAX_MIDI_PITCH
-        ),
+        event_codec.EventRange("pitch", note_seq.MIN_MIDI_PITCH, note_seq.MAX_MIDI_PITCH),
         event_codec.EventRange("velocity", 0, config.num_velocity_bins),
-        event_codec.EventRange(
-            "program", note_seq.MIN_MIDI_PROGRAM, note_seq.MAX_MIDI_PROGRAM
-        ),
+        event_codec.EventRange("tie", 0, 0),
+        event_codec.EventRange("program", note_seq.MIN_MIDI_PROGRAM, note_seq.MAX_MIDI_PROGRAM),
+        event_codec.EventRange("drum", note_seq.MIN_MIDI_PITCH, note_seq.MAX_MIDI_PITCH),
     ]
-
-    codec = event_codec.Codec(
+    return event_codec.Codec(
         max_shift_steps=config.steps_per_second * config.max_shift_seconds,
         steps_per_second=config.steps_per_second,
-        event_ranges=event_ranges,
+        event_ranges=event_ranges
     )
-    return codec
+
+
+def num_velocity_bins_from_codec(codec: event_codec.Codec) -> int:
+    lo, hi = codec.event_type_range("velocity")
+    return hi - lo
+
+
+def velocity_to_bin(velocity: int, num_velocity_bins: int) -> int:
+    if velocity == 0:
+        return 0
+    return math.ceil(num_velocity_bins * velocity / note_seq.MAX_MIDI_VELOCITY)
+
+
+def bin_to_velocity(velocity_bin: int, num_velocity_bins: int) -> int:
+    if velocity_bin == 0:
+        return 0
+    return int(note_seq.MAX_MIDI_VELOCITY * velocity_bin / num_velocity_bins)
+
+
+def get_special_tokens() -> dict:
+    return {
+        "pad_token": PAD_TOKEN,
+        "eos_token": EOS_TOKEN,
+        "unk_token": UNK_TOKEN,
+        "num_special_tokens": NUM_SPECIAL_TOKENS
+    }

@@ -3,6 +3,9 @@ eval:
   hparams_yaml: lightning_logs/version_0/hparams.yaml
   accelerator: gpu
   devices: [0]
+  eval_one: false  
+  segment_batch_size: 4
 
 defaults:
-  - data: data
+  - data
+  - _self_

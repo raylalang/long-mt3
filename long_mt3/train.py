@@ -7,7 +7,7 @@ import torch.nn as nn
 import time
 
 from .model import MT3Model
-from .model_v2 import MT3ModelV2
+# from .model_v2 import MT3ModelV2
 from .data_pipeline import MT3DataPipeline
 from .vocabularies import build_codec, VocabularyConfig
 from .contrib.mt3.spectrograms import SpectrogramConfig

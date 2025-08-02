@@ -11,3 +11,4 @@ lightning_logs/
 checkpoints/
 *.ckpt
 *.csv
+outputs/

@@ -43,51 +43,6 @@ def generate_square_subsequent_mask(sz):
     return torch.triu(torch.full((sz, sz), float("-inf")), diagonal=1)
 
 
-import hydra
-from omegaconf import DictConfig
-import torch
-import numpy as np
-import torchaudio
-from tqdm import tqdm
-import pandas as pd
-import yaml
-import os
-import json
-import note_seq
-
-from .model import MT3Model
-from .vocabularies import build_codec, VocabularyConfig
-from .contrib.mt3.note_sequences import NoteEncodingWithTiesSpec
-from .contrib.mt3.metrics_utils import event_predictions_to_ns, frame_metrics, get_prettymidi_pianoroll
-from .contrib.mt3.spectrograms import SpectrogramConfig, compute_spectrogram, split_audio
-
-from .train import MT3Trainer
-
-torch.backends.cudnn.benchmark = True
-
-def load_audio(path, sr=16000):
-    audio, orig_sr = torchaudio.load(path)
-    if orig_sr != sr:
-        audio = torchaudio.functional.resample(audio, orig_sr, sr)
-    return audio.mean(0)
-
-
-def segment_audio(features, segment_frames, hop_width=256, sample_rate=16000):
-    segments = []
-    for i in range(0, features.shape[0], segment_frames):
-        chunk = features[i:i+segment_frames]
-        if chunk.shape[0] < segment_frames:
-            pad = segment_frames - chunk.shape[0]
-            chunk = np.pad(chunk, ((0, pad), (0, 0)))
-        start_time = i * hop_width / sample_rate
-        segments.append((start_time, chunk))
-    return segments
-
-
-def generate_square_subsequent_mask(sz):
-    return torch.triu(torch.full((sz, sz), float("-inf")), diagonal=1)
-
-
 def run_model(model, segments, device, bos_token=1, eos_token=2, max_len=1024, batch_size=1, verbose=False):
     model.eval()
     predictions = []

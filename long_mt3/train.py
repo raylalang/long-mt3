@@ -7,9 +7,12 @@ import torch.nn as nn
 import time
 
 from .model import MT3Model
+from .model_v2 import MT3ModelV2
 from .data_pipeline import MT3DataPipeline
 from .vocabularies import build_codec, VocabularyConfig
 from .contrib.mt3.spectrograms import SpectrogramConfig
+
+torch.backends.cudnn.benchmark = True
 
 
 class MT3Trainer(pl.LightningModule):
@@ -17,6 +20,7 @@ class MT3Trainer(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.model = MT3Model(**model_config)
+        # self.model = MT3ModelV2(**model_config)
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=0)  # pad token assumed 0
 
     def forward(self, src, tgt):
@@ -73,9 +77,10 @@ def main(cfg: DictConfig):
     model_config = {
         "input_dim": spec_config.num_mel_bins,
         "vocab_size": codec.num_classes,
-        "n_layers": cfg.model.n_layers,
-        "n_heads": cfg.model.n_heads,
         "d_model": cfg.model.d_model,
+        "nhead": cfg.model.nhead,
+        "dim_feedforward": cfg.model.dim_feedforward,
+        "num_layers": cfg.model.num_layers,
         "dropout": cfg.model.dropout,
     }
 
@@ -84,9 +89,12 @@ def main(cfg: DictConfig):
     )
     
     checkpoint_callback = ModelCheckpoint(
-        monitor=None,
-        save_top_k=-1,
-        filename="mt3-{epoch:02d}"
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=True,
+        filename="epoch-{epoch:03d}",
+        auto_insert_metric_name=False
     )
     timer_callback = EpochTimer()
     trainer = pl.Trainer(

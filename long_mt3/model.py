@@ -26,15 +26,16 @@ def generate_square_subsequent_mask(sz):
 
 
 class MT3Encoder(nn.Module):
-    def __init__(self, input_dim, d_model, n_layers, n_heads, dropout=0.1):
+    def __init__(self, input_dim, d_model, nhead, dim_feedforward, num_layers, dropout=0.1):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
         self.encoder_layers = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-                d_model=d_model, nhead=n_heads, dropout=dropout, batch_first=True
+                d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
+                dropout=dropout, batch_first=True
             ),
-            num_layers=n_layers,
+            num_layers=num_layers,
         )
 
     def forward(self, x, src_key_padding_mask=None):
@@ -46,16 +47,17 @@ class MT3Encoder(nn.Module):
 
 class MT3Decoder(nn.Module):
     def __init__(
-        self, vocab_size, d_model, n_layers, n_heads, dropout=0.1, max_len=1024
+        self, vocab_size, d_model, nhead, dim_feedforward, num_layers, dropout=0.1, max_len=1024
     ):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, d_model)
         self.pos_decoder = PositionalEncoding(d_model, max_len=max_len)
         self.decoder_layers = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(
-                d_model=d_model, nhead=n_heads, dropout=dropout, batch_first=True
+                d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
+                dropout=dropout, batch_first=True
             ),
-            num_layers=n_layers,
+            num_layers=num_layers,
         )
         self.out_proj = nn.Linear(d_model, vocab_size)
 
@@ -81,11 +83,12 @@ class MT3Decoder(nn.Module):
 
 class MT3Model(nn.Module):
     def __init__(
-        self, input_dim, vocab_size, d_model=512, n_layers=8, n_heads=8, dropout=0.1
+        self, input_dim, vocab_size,
+        d_model=512, nhead=6, dim_feedforward=1024, num_layers=8, dropout=0.1
     ):
         super().__init__()
-        self.encoder = MT3Encoder(input_dim, d_model, n_layers, n_heads, dropout)
-        self.decoder = MT3Decoder(vocab_size, d_model, n_layers, n_heads, dropout)
+        self.encoder = MT3Encoder(input_dim, d_model, nhead, dim_feedforward, num_layers, dropout)
+        self.decoder = MT3Decoder(vocab_size, d_model, nhead, dim_feedforward, num_layers, dropout)
 
     def forward(self, src, tgt, src_key_padding_mask=None, tgt_key_padding_mask=None):
         memory = self.encoder(src, src_key_padding_mask=src_key_padding_mask)

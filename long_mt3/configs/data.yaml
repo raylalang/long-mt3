@@ -1,9 +1,9 @@
 data:
   manifest_path: manifests/manifest_20250712_135419.json
 
-  batch_size_per_device: 6
+  batch_size_per_device: 16
   num_workers: 16
-  segment_seconds: 10.0
+  segment_seconds: 2.048
   temperature: 0.3
 
   spectrogram_config:

@@ -70,7 +70,8 @@ class MT3DataPipeline(pl.LightningDataModule):
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
             persistent_workers=True,
-            prefetch_factor=4
+            prefetch_factor=4,
+            pin_memory=True
         )
 
     def val_dataloader(self):
@@ -81,5 +82,6 @@ class MT3DataPipeline(pl.LightningDataModule):
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
             persistent_workers=True,
-            prefetch_factor=4
+            prefetch_factor=4,
+            pin_memory=True
         )

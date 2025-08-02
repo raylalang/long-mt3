@@ -1,5 +1,6 @@
 model:
-  n_layers: 12
-  n_heads: 12
-  d_model: 768
+  d_model: 512
+  nhead: 8
+  dim_feedforward: 2048
+  num_layers: 8
   dropout: 0.1

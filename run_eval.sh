@@ -1,1 +1,1 @@
-python3 -m long_mt3.eval
+python3 eval.py

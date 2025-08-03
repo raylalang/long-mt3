@@ -1,0 +1,1 @@
+python3 build_manifest.py

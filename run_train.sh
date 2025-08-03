@@ -1,1 +1,2 @@
-python3 -m long_mt3.train
+python3 train.py
+# nohup bash ./run_train.sh > out.log 2>&1 &

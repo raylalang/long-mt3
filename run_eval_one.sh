@@ -1,1 +1,1 @@
-python -m long_mt3.eval eval.eval_one=true
+python3 eval.py eval.eval_one=true

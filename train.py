@@ -2,15 +2,15 @@ import hydra
 from omegaconf import DictConfig
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
+from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import torch
 import torch.nn as nn
 import time
 
-from .model import MT3Model
-# from .model_v2 import MT3ModelV2
-from .data_pipeline import MT3DataPipeline
-from .vocabularies import build_codec, VocabularyConfig
-from .contrib.mt3.spectrograms import SpectrogramConfig
+from long_mt3.model import MT3Model
+from long_mt3.data_pipeline import MT3DataPipeline
+from long_mt3.vocabularies import build_codec, VocabularyConfig
+from long_mt3.contrib.mt3.spectrograms import SpectrogramConfig
 
 torch.backends.cudnn.benchmark = True
 
@@ -20,19 +20,20 @@ class MT3Trainer(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.model = MT3Model(**model_config)
-        # self.model = MT3ModelV2(**model_config)
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=0)  # pad token assumed 0
 
     def forward(self, src, tgt):
         return self.model(src, tgt)
 
     def training_step(self, batch, batch_idx):
+        start_time = time.time()
         src, tgt = batch
         logits = self(src, tgt[:, :-1])
         loss = self.loss_fn(
             logits.reshape(-1, logits.shape[-1]), tgt[:, 1:].reshape(-1)
         )
         self.log("train_loss", loss)
+        # print(f"[TRAIN STEP] Time: {(time.time() - start_time):.3f}s")
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -87,6 +88,7 @@ def main(cfg: DictConfig):
     model = MT3Trainer(
         model_config=model_config, learning_rate=cfg.train.learning_rate
     )
+    # model = torch.compile(model)
     
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
@@ -97,13 +99,20 @@ def main(cfg: DictConfig):
         auto_insert_metric_name=False
     )
     timer_callback = EpochTimer()
+    early_stop_callback = EarlyStopping(
+        monitor="val_loss",
+        patience=10,
+        mode="min",
+        verbose=True
+    )
     trainer = pl.Trainer(
         max_epochs=cfg.train.max_epochs,
         accelerator=cfg.train.accelerator,
         devices=cfg.train.devices,
         precision=cfg.train.precision,
         strategy=cfg.train.strategy,
-        callbacks=[checkpoint_callback, timer_callback],
+        callbacks=[checkpoint_callback, timer_callback, early_stop_callback],
+        use_distributed_sampler=False,
         logger=True,
         enable_progress_bar=True,
         num_sanity_val_steps=0,

@@ -1,12 +1,15 @@
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, get_worker_info
 import random
 import numpy as np
 import note_seq
+from collections import OrderedDict 
+from .vocabularies import EOS_TOKEN
 from .contrib.mt3.spectrograms import compute_spectrogram
 from .contrib.mt3.run_length_encoding import encode_and_index_events
 from .contrib.mt3.event_codec import Event
 from .contrib.mt3 import note_sequences
+from .contrib.mt3.note_sequences import NoteEncodingState, note_event_data_to_events
 
 MAX_LEN = 1024
 
@@ -19,7 +22,7 @@ class MT3Dataset(Dataset):
     def __init__(self, data_list, spectrogram_config, codec, segment_frames):
         """
         Args:
-            data_list: List of dicts, each with 'audio_path' and 'event_path' keys
+            data_list: List of dicts, each with 'mix_audio_path' and 'midi_path' keys
             spectrogram_config: SpectrogramConfig dataclass
             codec: Vocabulary or codec object for encoding events
             segment_frames: chunking into fixed-length segments.
@@ -28,17 +31,37 @@ class MT3Dataset(Dataset):
         self.spectrogram_config = spectrogram_config
         self.codec = codec
         self.segment_frames = segment_frames
+        
+        self.cache = OrderedDict()
+        self.max_cache_size = 200
 
 
     def __len__(self):
         return len(self.data_list)
 
-    def __getitem__(self, idx):
-        sample = self.data_list[idx]
-        audio = self.load_audio(sample["mix_audio_path"])
 
-        # Compute spectrogram
-        spec = compute_spectrogram(audio, self.spectrogram_config)
+    def __getitem__(self, idx):
+        worker_info = get_worker_info()
+        if worker_info is not None:
+            if not hasattr(self, "_worker_cache"):
+                self._worker_cache = OrderedDict()
+            cache = self._worker_cache
+        else:
+            cache = self.cache
+
+        if idx in cache:
+            spec, ns = cache[idx]
+        else:
+            sample = self.data_list[idx]
+            audio = self.load_audio(sample["mix_audio_path"])
+            spec = compute_spectrogram(audio, self.spectrogram_config)
+            ns = note_seq.midi_file_to_note_sequence(sample["midi_path"])
+            note_sequences.validate_note_sequence(ns)
+            ns = note_sequences.trim_overlapping_notes(ns)
+            cache[idx] = (spec, ns)
+            if len(cache) > self.max_cache_size:
+                cache.popitem(last=False)
+
         n_frames = spec.shape[0]
 
         # Determine crop window
@@ -60,10 +83,18 @@ class MT3Dataset(Dataset):
         end_time = end_frame / frames_per_second
 
         # Load + trim events
-        events = self.load_events(sample["midi_path"], start_time, end_time)
-        event_ids = torch.tensor(events, dtype=torch.long)[:MAX_LEN]
+        events = self.load_events(ns, start_time, end_time)
+        if len(events) == 0:
+            events = [EOS_TOKEN]
+
+        if len(events) >= MAX_LEN:
+            events = events[:MAX_LEN - 1]
+            events.append(EOS_TOKEN)
+
+        event_ids = torch.tensor(events, dtype=torch.long)
 
         return spec, event_ids
+
 
     def load_audio(self, path):
         import torchaudio
@@ -75,48 +106,45 @@ class MT3Dataset(Dataset):
             )
         return waveform.numpy().squeeze()
 
-    def load_events(self, midi_path, start_time, end_time):
-        ns = note_seq.midi_file_to_note_sequence(midi_path)
-        note_sequences.validate_note_sequence(ns)
-        ns = note_sequences.trim_overlapping_notes(ns)
 
-        # Filter notes based on start_time and end_time
+    def load_events(self, ns, start_time, end_time):
         filtered_notes = [
             note for note in ns.notes
             if start_time <= note.start_time < end_time
         ]
         
-        # Replace notes safely
-        del ns.notes[:]  # Clears all notes
+        del ns.notes[:]
         for note in filtered_notes:
             ns.notes.add().CopyFrom(note)
 
-        # Prepare encoding
         ns_total_time = end_time - start_time
         event_times = [note.start_time - start_time for note in ns.notes]
-        event_values = [(note.pitch, note.velocity) for note in ns.notes]
-
-        def encode_fn(state, value, codec):
-            pitch, velocity = value
-            return [Event("pitch", pitch), Event("velocity", velocity)]
+        event_values = [
+            note_sequences.NoteEventData(
+                pitch=note.pitch,
+                velocity=note.velocity,
+                program=note.program,
+                is_drum=note.is_drum
+            )
+            for note in ns.notes
+        ]
 
         frame_times = [
             i / self.codec.steps_per_second
             for i in range(int(ns_total_time * self.codec.steps_per_second))
         ]
 
+        state = NoteEncodingState()
         events, *_ = encode_and_index_events(
-            state=None,
+            state=state,
             event_times=event_times,
             event_values=event_values,
-            encode_event_fn=encode_fn,
+            encode_event_fn=note_event_data_to_events,
             codec=self.codec,
             frame_times=frame_times,
         )
 
         return events
-
-
 
 
 class MT3TemperatureSampler(Dataset):
@@ -139,12 +167,13 @@ class MT3TemperatureSampler(Dataset):
         probs = sizes ** temperature
         self.probs = probs / probs.sum()
 
+
     def __len__(self):
         return sum(len(ds) for ds in self.datasets.values())
+
 
     def __getitem__(self, _):
         dataset_name = random.choices(self.dataset_names, weights=self.probs, k=1)[0]
         ds = self.datasets[dataset_name]
         idx = random.randint(0, len(ds) - 1)
         return ds[idx]
-

@@ -43,6 +43,7 @@ class MT3DataPipeline(pl.LightningDataModule):
                 segment_seconds=self.segment_seconds,
                 temperature=self.temperature,
             )
+            print(f"Loaded {len(self.dataset[split])} samples for {split} split.")
 
     def collate_fn(self, batch):
         specs, tokens = zip(*batch)
@@ -59,7 +60,7 @@ class MT3DataPipeline(pl.LightningDataModule):
         for i in range(len(batch)):
             padded_specs[i, :spec_lens[i]] = specs[i]
             padded_tokens[i, :token_lens[i]] = tokens[i]
-
+        
         return padded_specs, padded_tokens
 
     def train_dataloader(self):
@@ -67,10 +68,11 @@ class MT3DataPipeline(pl.LightningDataModule):
             self.dataset["train"],
             batch_size=self.batch_size,
             shuffle=True,
+            sampler=None,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
-            persistent_workers=True,
-            prefetch_factor=4,
+            persistent_workers=self.num_workers > 0,
+            prefetch_factor=4 if self.num_workers > 0 else None,
             pin_memory=True
         )
 
@@ -81,7 +83,7 @@ class MT3DataPipeline(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
-            persistent_workers=True,
-            prefetch_factor=4,
+            persistent_workers=self.num_workers > 0,
+            prefetch_factor=4 if self.num_workers > 0 else None,
             pin_memory=True
         )

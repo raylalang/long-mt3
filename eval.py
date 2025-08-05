@@ -40,16 +40,11 @@ def segment_audio(features, segment_frames, hop_width=256, sample_rate=16000):
     return segments
 
 
-def generate_square_subsequent_mask(sz):
-    return torch.triu(torch.full((sz, sz), float("-inf")), diagonal=1)
-
-
 def run_model(model, segments, device, codec, max_len=1024, batch_size=1, verbose=False):
     model.eval()
     predictions = []
     special_tokens = get_special_tokens()
-    bos_token = special_tokens["eos_token"]
-    eos_token = special_tokens["unk_token"]
+    eos_token = special_tokens["eos_token"]
 
     progress = tqdm(total=len(segments), desc="Decoding segments", disable=not verbose)
 
@@ -71,12 +66,12 @@ def run_model(model, segments, device, codec, max_len=1024, batch_size=1, verbos
                 raise
 
         B = src_batch.size(0)
-        tgt = torch.full((B, 1), bos_token, dtype=torch.long, device=device)
+        tgt = torch.full((B, 1), eos_token, dtype=torch.long, device=device)
         finished = torch.zeros(B, dtype=torch.bool, device=device)
         out_tokens = [[] for _ in range(B)]
 
         for step in range(max_len):
-            tgt_mask = generate_square_subsequent_mask(tgt.size(1)).to(device)
+            tgt_mask = model.generate_square_subsequent_mask(tgt.size(1)).to(device)
             try:
                 logits = model.decoder(tgt, memory_batch, tgt_mask=tgt_mask)
             except RuntimeError as e:

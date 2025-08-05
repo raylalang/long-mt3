@@ -1,1 +1,1 @@
-python3 train.py train.ckpt_path="lightning_logs/version_0/checkpoints/mt3-25.ckpt"
+python3 train.py train.ckpt_path="lightning_logs/version_0/checkpoints/last.ckpt"

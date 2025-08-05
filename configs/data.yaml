@@ -10,3 +10,6 @@ data:
     sample_rate: 16000
     hop_width: 256
     num_mel_bins: 229
+
+  ignore_program: true
+  debug: false

@@ -4,14 +4,15 @@ import random
 import numpy as np
 import note_seq
 from collections import OrderedDict 
-from .vocabularies import EOS_TOKEN
+from .vocabularies import get_special_tokens
 from .contrib.mt3.spectrograms import compute_spectrogram
 from .contrib.mt3.run_length_encoding import encode_and_index_events
 from .contrib.mt3.event_codec import Event
 from .contrib.mt3 import note_sequences
-from .contrib.mt3.note_sequences import NoteEncodingState, note_event_data_to_events
+from .contrib.mt3.note_sequences import NoteEncodingState, note_event_data_to_events, note_sequence_to_onsets_and_offsets_and_programs
 
-MAX_LEN = 1024
+MAX_LEN = 2048
+EOS_TOKEN = get_special_tokens()["eos_token"]
 
 class MT3Dataset(Dataset):
     """
@@ -19,7 +20,7 @@ class MT3Dataset(Dataset):
     Each sample yields (spectrogram, target_event_ids).
     """
 
-    def __init__(self, data_list, spectrogram_config, codec, segment_frames):
+    def __init__(self, data_list, spectrogram_config, codec, segment_frames, ignore_program=False, debug=False):
         """
         Args:
             data_list: List of dicts, each with 'mix_audio_path' and 'midi_path' keys
@@ -33,7 +34,9 @@ class MT3Dataset(Dataset):
         self.segment_frames = segment_frames
         
         self.cache = OrderedDict()
-        self.max_cache_size = 200
+        self.max_cache_size = 100
+        self.ignore_program = ignore_program
+        self.debug = debug
 
 
     def __len__(self):
@@ -66,7 +69,10 @@ class MT3Dataset(Dataset):
 
         # Determine crop window
         if n_frames >= self.segment_frames:
-            start_frame = np.random.randint(0, n_frames - self.segment_frames + 1)
+            if not self.debug:
+                start_frame = np.random.randint(0, n_frames - self.segment_frames + 1)
+            else:
+                start_frame = 0
             end_frame = start_frame + self.segment_frames
             spec = spec[start_frame:end_frame]
         else:
@@ -85,11 +91,11 @@ class MT3Dataset(Dataset):
         # Load + trim events
         events = self.load_events(ns, start_time, end_time)
         if len(events) == 0:
-            events = [EOS_TOKEN]
-
-        if len(events) >= MAX_LEN:
-            events = events[:MAX_LEN - 1]
-            events.append(EOS_TOKEN)
+            events = np.array([EOS_TOKEN])
+        elif len(events) >= MAX_LEN:
+            events = np.concatenate([events[:MAX_LEN - 1], [EOS_TOKEN]])
+        else:
+            events = np.concatenate([events, [EOS_TOKEN]])
 
         event_ids = torch.tensor(events, dtype=torch.long)
 
@@ -123,7 +129,7 @@ class MT3Dataset(Dataset):
             note_sequences.NoteEventData(
                 pitch=note.pitch,
                 velocity=note.velocity,
-                program=note.program,
+                program=note.program if not self.ignore_program else 0,
                 is_drum=note.is_drum
             )
             for note in ns.notes
@@ -135,6 +141,7 @@ class MT3Dataset(Dataset):
         ]
 
         state = NoteEncodingState()
+
         events, *_ = encode_and_index_events(
             state=state,
             event_times=event_times,
@@ -148,7 +155,7 @@ class MT3Dataset(Dataset):
 
 
 class MT3TemperatureSampler(Dataset):
-    def __init__(self, dataset_map, spectrogram_config, codec, segment_seconds=10, temperature=0.3):
+    def __init__(self, dataset_map, spectrogram_config, codec, segment_seconds=10, temperature=0.3, ignore_program=True, debug=False):
         self.datasets = {}
         self.lengths = []
 
@@ -156,7 +163,7 @@ class MT3TemperatureSampler(Dataset):
         segment_frames = int(segment_seconds * frames_per_second)
 
         for name, samples in dataset_map.items():
-            ds = MT3Dataset(samples, spectrogram_config, codec, segment_frames)
+            ds = MT3Dataset(samples, spectrogram_config, codec, segment_frames, ignore_program, debug=debug)
             self.datasets[name] = ds
             self.lengths.append(len(ds))
 

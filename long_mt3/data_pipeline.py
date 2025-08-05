@@ -16,6 +16,8 @@ class MT3DataPipeline(pl.LightningDataModule):
         num_workers=4,
         segment_seconds=10.0,
         temperature=1.0,
+        ignore_program=False,
+        debug=False
     ):
         super().__init__()
         self.manifest_path = manifest_path
@@ -26,6 +28,8 @@ class MT3DataPipeline(pl.LightningDataModule):
         self.segment_seconds = segment_seconds
         self.temperature = temperature
         self.dataset = {}
+        self.ignore_program = ignore_program
+        self.debug = debug
 
     def setup(self, stage=None):
         with open(self.manifest_path) as f:
@@ -42,7 +46,17 @@ class MT3DataPipeline(pl.LightningDataModule):
                 codec=self.codec,
                 segment_seconds=self.segment_seconds,
                 temperature=self.temperature,
+                ignore_program=self.ignore_program,
+                debug=self.debug
             )
+
+            #DEBUG OVERRIDE: Truncate to few samples per split
+            if self.debug:
+                max_debug_samples = 8  # e.g. 2 batches if batch_size=4
+                original_len = len(self.dataset[split])
+                self.dataset[split] = torch.utils.data.Subset(self.dataset[split], range(min(max_debug_samples, original_len)))
+                print(f"[DEBUG] Truncated {split} dataset from {original_len} to {len(self.dataset[split])} samples.")
+
             print(f"Loaded {len(self.dataset[split])} samples for {split} split.")
 
     def collate_fn(self, batch):

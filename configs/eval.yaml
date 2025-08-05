@@ -1,6 +1,6 @@
 eval:
-  checkpoint: lightning_logs/version_4/checkpoints/epoch-045.ckpt
-  hparams_yaml: lightning_logs/version_4/hparams.yaml
+  checkpoint: lightning_logs/version_1/checkpoints/last.ckpt
+  hparams_yaml: lightning_logs/version_1/hparams.yaml
   accelerator: gpu
   devices: [0]
   eval_one: false  

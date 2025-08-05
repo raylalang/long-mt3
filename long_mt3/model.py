@@ -3,9 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+MAX_LEN=2048
+
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=1024):
+    def __init__(self, d_model, max_len):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
@@ -21,15 +23,11 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, : x.size(1)].to(x.device)
 
 
-def generate_square_subsequent_mask(sz):
-    return torch.triu(torch.ones(sz, sz) * float("-inf"), diagonal=1).to(torch.float32)
-
-
 class MT3Encoder(nn.Module):
     def __init__(self, input_dim, d_model, nhead, dim_feedforward, num_layers, dropout=0.1):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, d_model)
-        self.pos_encoder = PositionalEncoding(d_model)
+        self.pos_encoder = PositionalEncoding(d_model, max_len=MAX_LEN)
         self.encoder_layers = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
@@ -47,11 +45,10 @@ class MT3Encoder(nn.Module):
 
 class MT3Decoder(nn.Module):
     def __init__(
-        self, vocab_size, d_model, nhead, dim_feedforward, num_layers, dropout=0.1, max_len=1024
-    ):
+        self, vocab_size, d_model, nhead, dim_feedforward, num_layers, dropout=0.1):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, d_model)
-        self.pos_decoder = PositionalEncoding(d_model, max_len=max_len)
+        self.pos_decoder = PositionalEncoding(d_model, max_len=MAX_LEN)
         self.decoder_layers = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(
                 d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
@@ -94,7 +91,7 @@ class MT3Model(nn.Module):
         memory = self.encoder(src, src_key_padding_mask=src_key_padding_mask)
 
         tgt_len = tgt.shape[1]
-        tgt_mask = generate_square_subsequent_mask(tgt_len).to(tgt.device)
+        tgt_mask = self.generate_square_subsequent_mask(tgt_len).to(tgt.device)
         logits = self.decoder(
             tgt,
             memory,
@@ -103,3 +100,6 @@ class MT3Model(nn.Module):
             memory_key_padding_mask=src_key_padding_mask,
         )
         return logits
+
+    def generate_square_subsequent_mask(self, sz):
+        return torch.triu(torch.ones(sz, sz) * float("-inf"), diagonal=1).to(torch.float32)

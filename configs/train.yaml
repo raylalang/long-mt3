@@ -1,6 +1,7 @@
 train:
   learning_rate: 1e-3
   max_epochs: 50
+  early_stop_patience: 10
   precision: "16-mixed"
 
   accelerator: gpu
@@ -9,3 +10,4 @@ train:
 
   ckpt_path: null
   debug: false
+  tb_logger: true

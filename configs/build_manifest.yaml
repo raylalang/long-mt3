@@ -9,11 +9,13 @@ paths:
   musicnet: ../../data/musicnet_yourmt3_16k
   slakh2100: ../../data/slakh2100_yourmt3_16k
   guitarset: ../../data/guitarset_yourmt3_16k
+  babyslakh: ../../data/babyslakh_16k
 
 split:
   maestro: [0.88, 0.02, 0.1]
   urmp: [0.88, 0.02, 0.1]
   guitarset: [0.88, 0.02, 0.1]
+  babyslakh: [0.9, 0.05, 0.05]
 
 seed: 420
 

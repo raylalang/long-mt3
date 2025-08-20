@@ -31,15 +31,27 @@ class MT3Dataset(Dataset):
     """
 
     def __init__(
-        self, data_list, spectrogram_config, codec, segment_frames, debug=False
+        self,
+        data_list,
+        spectrogram_config,
+        codec,
+        segment_seconds,
+        split=None,
+        debug=False,
     ):
         self.data_list = data_list
         self.spectrogram_config = spectrogram_config
         self.codec = codec
-        self.segment_frames = segment_frames
+        self.segment_seconds = segment_seconds
         self.cache = OrderedDict()
         self.max_cache_size = 100
+        self.split = split
         self.debug = debug
+
+        frames_per_second = (
+            spectrogram_config.sample_rate / spectrogram_config.hop_width
+        )
+        self.segment_frames = int(segment_seconds * frames_per_second)
 
     def __len__(self):
         return len(self.data_list)
@@ -69,11 +81,15 @@ class MT3Dataset(Dataset):
                 cache.popitem(last=False)
 
             if self.debug:
-                print(f"[DEBUG] Dataset Sample audio path: {sample['mix_audio_path']}")
-                print(f"[DEBUG] Dataset Sample MIDI path: {sample['midi_path']}")
-                print(f"[DEBUG] Dataset Sample spec shape: {spec.shape}")
                 print(
-                    f"[DEBUG] NoteSequence: {len(ns.notes)} notes, total_time={getattr(ns, 'total_time', 0.0):.2f}s"
+                    f"[DEBUG] Dataset ({self.split}) Sample audio path: {sample['mix_audio_path']}"
+                )
+                print(
+                    f"[DEBUG] Dataset ({self.split}) Sample MIDI path: {sample['midi_path']}"
+                )
+                print(f"[DEBUG] Dataset ({self.split}) Sample spec shape: {spec.shape}")
+                print(
+                    f"[DEBUG] NoteSequence ({self.split}): {len(ns.notes)} notes, total_time={ns.total_time:.2f}s"
                 )
 
         n_frames = spec.shape[0]
@@ -101,7 +117,7 @@ class MT3Dataset(Dataset):
                         0, min(start_frame, n_frames - self.segment_frames)
                     )
                 else:
-                    start_frame = 0  # no notes; fall back to start
+                    start_frame = 0  # no notes, fall back to start
                 self._fixed_starts[idx] = start_frame
             end_frame = start_frame + self.segment_frames
             spec = spec[start_frame:end_frame]
@@ -120,7 +136,7 @@ class MT3Dataset(Dataset):
 
         if self.debug and idx == 0:
             print(
-                f"[DEBUG] Using {self.segment_frames} frames, starting from {start_time:.2f}s to {end_time:.2f}s"
+                f"[DEBUG] Using {self.segment_frames} frames for {self.split}, starting from {start_time:.2f}s to {end_time:.2f}s"
             )
 
         # build events
@@ -152,13 +168,12 @@ class MT3Dataset(Dataset):
         if len(events) >= MAX_LEN:
             events = events[: MAX_LEN - 1]
 
+        # Build a single EOS-terminated sequence, then shift for input/target.
         base_ids = torch.tensor(events, dtype=torch.long) + NUM_SPECIAL_TOKENS
-        decoder_input_ids = torch.cat(
-            [base_ids, torch.tensor([EOS_TOKEN], dtype=torch.long)]
-        )
-        decoder_target_ids = torch.cat(
-            [base_ids[1:], torch.tensor([EOS_TOKEN], dtype=torch.long)]
-        )
+        seq = torch.cat([base_ids, torch.tensor([EOS_TOKEN], dtype=torch.long)])
+
+        decoder_input_ids = seq[:-1]
+        decoder_target_ids = seq[1:]
 
         if self.debug and idx == 0:
 
@@ -178,14 +193,18 @@ class MT3Dataset(Dataset):
                         )
                 return out
 
-            print(f"[DEBUG] Decoder Input tokens: {decode_seq(decoder_input_ids)}")
-            print(f"[DEBUG] Decoder Target tokens: {decode_seq(decoder_target_ids)}")
             print(
-                f"[DEBUG] Dataset spec stats - mean: {spec.mean().item():.4f}, std: {spec.std().item():.4f}, min: {spec.min().item():.4f}, max: {spec.max().item():.4f}"
+                f"[DEBUG] Decoder ({self.split}) Input tokens: {decode_seq(decoder_input_ids)}"
             )
-            print(f"[DEBUG] Dataset First input spec: {spec[0][:5]}")
-            print(f"[DEBUG] Decoder Input tensor: {decoder_input_ids}")
-            print(f"[DEBUG] Decoder Target tensor: {decoder_target_ids}")
+            print(
+                f"[DEBUG] Decoder ({self.split}) Target tokens: {decode_seq(decoder_target_ids)}"
+            )
+            print(
+                f"[DEBUG] Dataset ({self.split}) spec stats - mean: {spec.mean().item():.4f}, std: {spec.std().item():.4f}, min: {spec.min().item():.4f}, max: {spec.max().item():.4f}"
+            )
+            print(f"[DEBUG] Dataset ({self.split}) First input spec: {spec[0][:5]}")
+            print(f"[DEBUG] Decoder ({self.split}) Input tensor: {decoder_input_ids}")
+            print(f"[DEBUG] Decoder ({self.split}) Target tensor: {decoder_target_ids}")
 
             for name, tensor in [
                 ("Input", decoder_input_ids),
@@ -251,24 +270,26 @@ class MT3TemperatureSampler(Dataset):
         codec,
         segment_seconds=10,
         temperature=0.3,
+        split=None,
         debug=False,
     ):
         self.datasets = {}
         self.lengths = []
 
-        frames_per_second = (
-            spectrogram_config.sample_rate / spectrogram_config.hop_width
-        )
-        segment_frames = int(segment_seconds * frames_per_second)
-
         for name, samples in dataset_map.items():
             ds = MT3Dataset(
-                samples, spectrogram_config, codec, segment_frames, debug=debug
+                samples,
+                spectrogram_config,
+                codec,
+                segment_seconds,
+                split=split,
+                debug=debug,
             )
             self.datasets[name] = ds
             self.lengths.append(len(ds))
 
         self.dataset_names = list(self.datasets.keys())
+        self.split = split
 
         sizes = torch.tensor(self.lengths, dtype=torch.float)
         probs = sizes**temperature

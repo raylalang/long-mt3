@@ -22,7 +22,6 @@ from long_mt3.vocabularies import (
     NUM_SPECIAL_TOKENS,
 )
 from long_mt3.contrib.mt3.spectrograms import SpectrogramConfig
-from long_mt3.contrib.mt3.run_length_encoding import merge_run_length_encoded_targets
 
 torch.backends.cudnn.benchmark = True
 
@@ -34,6 +33,38 @@ class MT3Trainer(pl.LightningModule):
         self.model = MT3Model(**model_config)
         self.codec = codec
         self.debug = debug
+
+        # Precompute vocab-id sets per event type and a small transition table
+        def _ids(event_type: str) -> set[int]:
+            lo, hi = self.codec.event_type_range(event_type)
+            return set(range(lo + NUM_SPECIAL_TOKENS, hi + NUM_SPECIAL_TOKENS + 1))
+
+        self.SHIFT_IDS = _ids("shift")
+        self.PITCH_IDS = _ids("pitch")
+        self.VEL_IDS = _ids("velocity")
+        self.PROG_IDS = _ids("program")
+        self.DRUM_IDS = _ids("drum")
+        try:
+            self.TIE_IDS = _ids("tie")
+        except Exception:
+            self.TIE_IDS = set()
+
+        self.ALL_EVENT_IDS = (
+            self.SHIFT_IDS
+            | self.PITCH_IDS
+            | self.VEL_IDS
+            | self.PROG_IDS
+            | self.DRUM_IDS
+        )
+        self.ALLOW = {
+            "program": self.VEL_IDS,
+            "velocity": self.PITCH_IDS | self.DRUM_IDS,
+            "pitch": self.PROG_IDS | self.VEL_IDS | self.SHIFT_IDS,  # removed TIE_IDS
+            "drum": self.PROG_IDS | self.VEL_IDS | self.SHIFT_IDS,  # removed TIE_IDS
+            "shift": self.PROG_IDS | self.VEL_IDS | self.PITCH_IDS | self.DRUM_IDS,
+            "tie": self.PROG_IDS | self.VEL_IDS | self.PITCH_IDS | self.DRUM_IDS,
+            None: self.ALL_EVENT_IDS,
+        }
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN)
 
@@ -176,7 +207,9 @@ class MT3Trainer(pl.LightningModule):
                 ar_pred = self.autoregressive_decode(src[0:1], src_mask[0:1])
             if was_training:
                 self.train()
-            self.print(f"[DEBUG] Autoregressive Prediction: {ar_pred}")
+            self.print(
+                f"[DEBUG] Autoregressive Prediction: {self.decode_event_ids(torch.tensor(ar_pred[0][debug_range]))}"
+            )
 
         self.log(
             "val_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True, logger=True
@@ -211,43 +244,71 @@ class MT3Trainer(pl.LightningModule):
     def autoregressive_decode(self, src, src_mask=None, max_len=2048):
         self.model.eval()
         device = src.device
+        B = src.size(0)
 
-        # encode once
         memory = self.model.encoder(src, src_key_padding_mask=src_mask)
 
-        # start with EOS as BOS (your setup)
-        ys = torch.full((src.size(0), 1), EOS_TOKEN, dtype=torch.long, device=device)
+        ys = torch.full((B, 1), EOS_TOKEN, dtype=torch.long, device=device)
+        last_types = [None] * B
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
 
         for _ in range(max_len):
             tgt_mask = self.model.generate_square_subsequent_mask(
                 ys.size(1), device=device
             )
-
             logits = self.model.decoder(
                 tgt=ys,
                 memory=memory,
                 tgt_mask=tgt_mask,
                 tgt_key_padding_mask=None,
                 memory_key_padding_mask=src_mask,
-            )
-            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            ys = torch.cat([ys, next_token], dim=1)
-            if torch.all(next_token == EOS_TOKEN):
+            )  # [B, T, V]
+            step_logits = logits[:, -1, :]  # [B, V]
+
+            mask = torch.zeros_like(step_logits, dtype=torch.bool)
+            for b in range(B):
+                allowed = set(self.ALLOW.get(last_types[b], self.ALL_EVENT_IDS))
+                allowed.add(EOS_TOKEN)
+                if finished[b]:
+                    allowed = {EOS_TOKEN}
+                idxs = torch.tensor(sorted(allowed), device=step_logits.device)
+                mask[b, idxs] = True
+
+            step_logits = step_logits.masked_fill(~mask, float("-inf"))
+            next_token = torch.argmax(step_logits, dim=-1)  # [B]
+
+            ys = torch.cat([ys, next_token.unsqueeze(1)], dim=1)
+
+            for b in range(B):
+                tid = int(next_token[b].item())
+                if tid == EOS_TOKEN:
+                    finished[b] = True
+                    last_types[b] = None
+                elif tid in self.SHIFT_IDS:
+                    last_types[b] = "shift"
+                elif tid in self.TIE_IDS:
+                    last_types[b] = "tie"
+                elif tid in self.PROG_IDS:
+                    last_types[b] = "program"
+                elif tid in self.VEL_IDS:
+                    last_types[b] = "velocity"
+                elif tid in self.PITCH_IDS:
+                    last_types[b] = "pitch"
+                elif tid in self.DRUM_IDS:
+                    last_types[b] = "drum"
+                else:
+                    last_types[b] = None
+
+            if torch.all(finished):
                 break
 
-        merged = []
-        for seq in ys[:, 1:]:  # drop initial EOS
-            seq_np = (seq - NUM_SPECIAL_TOKENS).cpu().numpy()
-            arr = seq_np[seq_np >= 0]
-            if arr.ndim == 1:
-                merged_seq = arr
-            elif arr.ndim == 2:
-                merged_seq = merge_run_length_encoded_targets(arr, self.codec)
-            else:
-                merged_seq = np.array([], dtype=seq_np.dtype)
-            merged.append(torch.tensor(merged_seq, dtype=torch.long))
-
-        return merged
+        out = []
+        for b in range(B):
+            seq = ys[b, 1:].tolist()
+            if EOS_TOKEN in seq:
+                seq = seq[: seq.index(EOS_TOKEN) + 1]
+            out.append(seq)
+        return out
 
 
 class EpochTimer(Callback):
@@ -308,13 +369,18 @@ def main(cfg: DictConfig):
         filename="epoch-{epoch:03d}",
         auto_insert_metric_name=False,
     )
-    early_stop_callback = EarlyStopping(
-        monitor="val_loss",
-        patience=cfg.train.early_stop_patience,
-        mode="min",
-        verbose=True,
-    )
     timer_callback = EpochTimer()
+    callbacks = [checkpoint_callback, timer_callback]
+
+    if cfg.train.early_stop_patience > 0:
+        early_stop_callback = EarlyStopping(
+            monitor="val_loss",
+            patience=cfg.train.early_stop_patience,
+            mode="min",
+            verbose=True,
+        )
+        callbacks.append(early_stop_callback)
+
     logger = True
     if cfg.train.tb_logger:
         logger = TensorBoardLogger(".", name="lightning_logs")
@@ -325,12 +391,12 @@ def main(cfg: DictConfig):
         devices=cfg.train.devices,
         precision=cfg.train.precision,
         strategy=cfg.train.strategy,
-        callbacks=[checkpoint_callback, timer_callback, early_stop_callback],
+        callbacks=callbacks,
         use_distributed_sampler=False,
         logger=logger,
         enable_progress_bar=True,
         num_sanity_val_steps=0,
-        log_every_n_steps=1,
+        log_every_n_steps=10 if not cfg.train.debug else 1,
         enable_model_summary=True,
     )
     trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.train.ckpt_path)

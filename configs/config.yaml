@@ -3,6 +3,7 @@ defaults:
   - data
   - model
   - train
+  - eval
 
 hydra:
   run:

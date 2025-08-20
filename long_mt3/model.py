@@ -67,6 +67,10 @@ class MT3Decoder(nn.Module):
         )
         self.out_proj = nn.Linear(d_model, vocab_size)
 
+        # Tie decoder input embedding and output projection weights
+        self.out_proj.weight = self.embed.weight
+        nn.init.zeros_(self.out_proj.bias)
+
     def forward(
         self,
         tgt,

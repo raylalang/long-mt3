@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 import json
 from collections import defaultdict
-from .dataset import MT3TemperatureSampler
+from .dataset import MT3Dataset, MT3TemperatureSampler
 
 
 class MT3DataPipeline(pl.LightningDataModule):
@@ -40,31 +40,40 @@ class MT3DataPipeline(pl.LightningDataModule):
             for sample in manifest["manifest"][split]:
                 dataset_name = sample["dataset"]
                 dataset_map[dataset_name].append(sample)
-            self.dataset[split] = MT3TemperatureSampler(
-                dataset_map=dataset_map,
-                spectrogram_config=self.spectrogram_config,
-                codec=self.codec,
-                segment_seconds=self.segment_seconds,
-                temperature=self.temperature,
-                debug=self.debug,
-            )
-
-            if self.debug:
-                max_debug_samples = 8
-                original_len = len(self.dataset[split])
-                self.dataset[split] = torch.utils.data.Subset(
-                    self.dataset[split], range(min(max_debug_samples, original_len))
-                )
-                print(
-                    f"[DEBUG] Truncated {split} dataset from {original_len} to {len(self.dataset[split])} samples."
-                )
 
             if self.overfit_one and split == "train":
-                original_len = len(self.dataset[split])
-                self.dataset[split] = torch.utils.data.Subset(self.dataset[split], [0])
-                print(
-                    f"[OVERFIT] Truncated {split} dataset from {original_len} to 1 sample."
+                first = manifest["manifest"]["train"][0]
+                name = first["dataset"]
+                self.dataset[split] = MT3Dataset(
+                    data_list=[first],
+                    spectrogram_config=self.spectrogram_config,
+                    codec=self.codec,
+                    segment_seconds=self.segment_seconds,
+                    split=split,
+                    debug=self.debug,
                 )
+                print(
+                    f"[OVERFIT] Using a fixed single training sample from dataset '{name}'."
+                )
+            else:
+                self.dataset[split] = MT3TemperatureSampler(
+                    dataset_map=dataset_map,
+                    spectrogram_config=self.spectrogram_config,
+                    codec=self.codec,
+                    segment_seconds=self.segment_seconds,
+                    temperature=self.temperature,
+                    split=split,
+                    debug=self.debug,
+                )
+                if self.debug:
+                    max_debug_samples = 8
+                    original_len = len(self.dataset[split])
+                    self.dataset[split] = torch.utils.data.Subset(
+                        self.dataset[split], range(min(max_debug_samples, original_len))
+                    )
+                    print(
+                        f"[DEBUG] Truncated {split} dataset from {original_len} to {len(self.dataset[split])} samples."
+                    )
 
             print(f"Loaded {len(self.dataset[split])} samples for {split} split.")
 

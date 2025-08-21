@@ -12,6 +12,8 @@ from .contrib.mt3.spectrograms import compute_spectrogram
 from .contrib.mt3.run_length_encoding import (
     encode_and_index_events,
     run_length_encode_shifts_fn,
+    note_encoding_state_to_events,
+    note_sequence_to_onsets_and_offsets_and_programs,
 )
 from .contrib.mt3.event_codec import Event
 from .contrib.mt3.note_sequences import (
@@ -156,6 +158,7 @@ class MT3Dataset(Dataset):
             encode_event_fn=note_event_data_to_events,
             codec=self.codec,
             frame_times=frame_times,
+            encoding_state_to_events_fn=note_encoding_state_to_events,
         )
 
         # run-length encode shifts
@@ -236,29 +239,23 @@ class MT3Dataset(Dataset):
         return waveform.numpy().squeeze()
 
     def get_event_times_and_values(self, ns, start_time, end_time):
-        filtered_notes = [
-            note
-            for note in ns.notes
-            if note.end_time > start_time and note.start_time < end_time
-        ]
-        ns_segment = note_seq.NoteSequence()
-        ns_segment.ticks_per_quarter = ns.ticks_per_quarter
-        for note in filtered_notes:
-            new_note = ns_segment.notes.add()
-            new_note.CopyFrom(note)
-            new_note.start_time = max(0.0, note.start_time - start_time)
-            new_note.end_time = max(0.0, note.end_time - start_time)
-
-        event_times = [note.start_time for note in ns_segment.notes]
-        event_values = [
-            NoteEventData(
-                pitch=note.pitch,
-                velocity=note.velocity,
-                program=note.program,
-                is_drum=note.is_drum,
-            )
-            for note in ns_segment.notes
-        ]
+        """
+        Extract BOTH onsets and offsets (+programs/drums) for the cropped window.
+        Times are rebased so the segment starts at 0.0s.
+        """
+        # Crop to [start_time, end_time) then rebase to 0 for encoding.
+        seg = note_seq.NoteSequence()
+        seg.ticks_per_quarter = ns.ticks_per_quarter
+        for n in ns.notes:
+            if n.end_time > start_time and n.start_time < end_time:
+                m = seg.notes.add()
+                m.CopyFrom(n)
+                m.start_time = max(0.0, n.start_time - start_time)
+                m.end_time = max(0.0, n.end_time - start_time)
+        # Build onsetoffset events (with programs / drums)
+        event_times, event_values = note_sequence_to_onsets_and_offsets_and_programs(
+            seg
+        )
         return event_times, event_values
 
 

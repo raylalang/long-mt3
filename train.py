@@ -241,74 +241,61 @@ class MT3Trainer(pl.LightningModule):
             )
         return optimizer
 
-    def autoregressive_decode(self, src, src_mask=None, max_len=2048):
-        self.model.eval()
+    def autoregressive_decode(
+        self,
+        src: torch.Tensor,  # [1, S, F] spectrogram
+        src_mask: torch.Tensor = None,
+        max_len: int = 2048,
+        prefix_ids: list[int] | None = None,
+    ) -> torch.Tensor:
+        """
+        Greedy decode for a single example. Supports an optional decoder token prefix
+        (e.g., the MT3 tie-section). No caching (O(T^2)) but fine for eval.
+        Returns: LongTensor of shape [1, L] with decoded token ids (including EOS).
+        """
+        assert (
+            src.dim() == 3 and src.size(0) == 1
+        ), "Expect src of shape [1, S, F] for eval."
         device = src.device
-        B = src.size(0)
 
-        memory = self.model.encoder(src, src_key_padding_mask=src_mask)
+        def _forward(src_tensor: torch.Tensor, tgt_in: torch.Tensor):
+            out = None
+            if hasattr(self, "forward"):
+                try:
+                    out = self.forward(src_tensor, tgt_in)
+                except TypeError:
+                    out = None
+            if out is None and hasattr(self, "model"):
+                out = self.model(src_tensor, tgt_in)
+            if out is None and hasattr(self, "net"):
+                out = self.net(src_tensor, tgt_in)
+            # Unwrap dicts like {"logits": ...}
+            if isinstance(out, dict):
+                out = out.get("logits", out.get("logit", out))
+            return out  # expected shape [B=1, T, V]
 
-        ys = torch.full((B, 1), EOS_TOKEN, dtype=torch.long, device=device)
-        last_types = [None] * B
-        finished = torch.zeros(B, dtype=torch.bool, device=device)
+        ids: list[int] = list(prefix_ids or [])
+        assert len(ids) > 0, "prefix_ids must be provided (tie-section) for decoding."
 
-        for _ in range(max_len):
-            tgt_mask = self.model.generate_square_subsequent_mask(
-                ys.size(1), device=device
-            )
-            logits = self.model.decoder(
-                tgt=ys,
-                memory=memory,
-                tgt_mask=tgt_mask,
-                tgt_key_padding_mask=None,
-                memory_key_padding_mask=src_mask,
-            )  # [B, T, V]
-            step_logits = logits[:, -1, :]  # [B, V]
+        with torch.inference_mode():
+            for _ in range(max_len - len(ids)):
+                tgt_in = torch.tensor([ids], dtype=torch.long, device=device)  # [1, T]
+                logits = _forward(src, tgt_in)  # [1, T, V]
+                if logits is None:
+                    raise RuntimeError(
+                        "Decoder forward() returned None, check model call sites."
+                    )
+                if isinstance(logits, (list, tuple)):
+                    logits = logits[0]
+                # Take last step’s logits and pick argmax
+                next_id = int(torch.argmax(logits[:, -1, :], dim=-1).item())
+                ids.append(next_id)
 
-            mask = torch.zeros_like(step_logits, dtype=torch.bool)
-            for b in range(B):
-                allowed = set(self.ALLOW.get(last_types[b], self.ALL_EVENT_IDS))
-                allowed.add(EOS_TOKEN)
-                if finished[b]:
-                    allowed = {EOS_TOKEN}
-                idxs = torch.tensor(sorted(allowed), device=step_logits.device)
-                mask[b, idxs] = True
+                if next_id == EOS_TOKEN:
+                    break
 
-            step_logits = step_logits.masked_fill(~mask, float("-inf"))
-            next_token = torch.argmax(step_logits, dim=-1)  # [B]
-
-            ys = torch.cat([ys, next_token.unsqueeze(1)], dim=1)
-
-            for b in range(B):
-                tid = int(next_token[b].item())
-                if tid == EOS_TOKEN:
-                    finished[b] = True
-                    last_types[b] = None
-                elif tid in self.SHIFT_IDS:
-                    last_types[b] = "shift"
-                elif tid in self.TIE_IDS:
-                    last_types[b] = "tie"
-                elif tid in self.PROG_IDS:
-                    last_types[b] = "program"
-                elif tid in self.VEL_IDS:
-                    last_types[b] = "velocity"
-                elif tid in self.PITCH_IDS:
-                    last_types[b] = "pitch"
-                elif tid in self.DRUM_IDS:
-                    last_types[b] = "drum"
-                else:
-                    last_types[b] = None
-
-            if torch.all(finished):
-                break
-
-        out = []
-        for b in range(B):
-            seq = ys[b, 1:].tolist()
-            if EOS_TOKEN in seq:
-                seq = seq[: seq.index(EOS_TOKEN) + 1]
-            out.append(seq)
-        return out
+        # Return as a batch of size 1
+        return torch.tensor([ids], dtype=torch.long, device=device)
 
 
 class EpochTimer(Callback):

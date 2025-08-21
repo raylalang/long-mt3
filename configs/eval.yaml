@@ -1,10 +1,12 @@
 eval:
-  checkpoint: lightning_logs/version_1/checkpoints/last.ckpt
-  hparams_yaml: lightning_logs/version_1/hparams.yaml
+  checkpoint: lightning_logs/version_0/checkpoints/last.ckpt
+  hparams_yaml: lightning_logs/version_0/hparams.yaml
   accelerator: gpu
   devices: [0]
   eval_one: false  
   segment_batch_size: 32
+  start_time: 0
+  end_time: -1
 
 defaults:
   - data

@@ -28,7 +28,7 @@ import note_seq
 DEFAULT_VELOCITY = 100
 DEFAULT_NOTE_DURATION = 0.01
 
-# Quantization can result in zero-length notes; enforce a minimum duration.
+# Quantization can result in zero-length notes, enforce a minimum duration.
 MIN_NOTE_DURATION = 0.01
 
 
@@ -77,7 +77,7 @@ def trim_overlapping_notes(ns: note_seq.NoteSequence) -> note_seq.NoteSequence:
 
 
 def assign_instruments(ns: note_seq.NoteSequence) -> None:
-    """Assign instrument numbers to notes; modifies NoteSequence in place."""
+    """Assign instrument numbers to notes, modifies NoteSequence in place."""
     program_instruments = {}
     for note in ns.notes:
         if note.program not in program_instruments and not note.is_drum:
@@ -411,7 +411,7 @@ def decode_note_event(
         else:
             # note onset
             if (pitch, state.current_program) in state.active_pitches:
-                # The pitch is already active; this shouldn't really happen but we'll
+                # The pitch is already active, this shouldn't really happen but we'll
                 # try to handle it gracefully by ending the previous note and starting a
                 # new one.
                 onset_time, onset_velocity = state.active_pitches.pop(
@@ -451,7 +451,7 @@ def decode_note_event(
         # program change
         state.current_program = event.value
     elif event.type == "tie":
-        # end of tie section; end active notes that weren't declared tied
+        # end of tie section, end active notes that weren't declared tied
         if not state.is_tie_section:
             raise ValueError("tie section end event when not in tie section")
         for pitch, program in list(state.active_pitches.keys()):

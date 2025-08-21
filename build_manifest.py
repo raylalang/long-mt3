@@ -13,11 +13,13 @@ def parse_maestro(root):
     for midi_path in root.glob("*/*.mid"):
         mix_audio_path = midi_path.with_suffix(".wav")
         if mix_audio_path.exists():
-            items.append({
-                "dataset": "maestro",
-                "mix_audio_path": str(mix_audio_path.resolve()),
-                "midi_path": str(midi_path.resolve())
-            })
+            items.append(
+                {
+                    "dataset": "maestro",
+                    "mix_audio_path": str(mix_audio_path.resolve()),
+                    "midi_path": str(midi_path.resolve()),
+                }
+            )
     return items
 
 
@@ -28,11 +30,13 @@ def parse_urmp(root):
         name = mix_audio_path.stem.split(".")[0]
         midi_matches = list(root.glob(f"{name}.*converted.mid"))
         if midi_matches:
-            items.append({
-                "dataset": "urmp",
-                "mix_audio_path": str(mix_audio_path.resolve()),
-                "midi_path": str(midi_matches[0].resolve())
-            })
+            items.append(
+                {
+                    "dataset": "urmp",
+                    "mix_audio_path": str(mix_audio_path.resolve()),
+                    "midi_path": str(midi_matches[0].resolve()),
+                }
+            )
     return items
 
 
@@ -48,11 +52,13 @@ def parse_musicnet(root):
             stem = mix_audio_path.stem
             midi_path = label_dir / f"{stem}.mid"
             if midi_path.exists():
-                result[split].append({
-                    "dataset": "musicnet",
-                    "mix_audio_path": str(mix_audio_path.resolve()),
-                    "midi_path": str(midi_path.resolve())
-                })
+                result[split].append(
+                    {
+                        "dataset": "musicnet",
+                        "mix_audio_path": str(mix_audio_path.resolve()),
+                        "midi_path": str(midi_path.resolve()),
+                    }
+                )
     return result
 
 
@@ -70,11 +76,13 @@ def parse_slakh2100(root):
             mix_audio_path = song_dir / "mix.wav"
             if mix_audio_path.exists() and midi_path.exists():
                 canonical = "validation" if split == "validation" else split
-                result[canonical].append({
-                    "dataset": "slakh2100",
-                    "mix_audio_path": str(mix_audio_path.resolve()),
-                    "midi_path": str(midi_path.resolve())
-                })
+                result[canonical].append(
+                    {
+                        "dataset": "slakh2100",
+                        "mix_audio_path": str(mix_audio_path.resolve()),
+                        "midi_path": str(midi_path.resolve()),
+                    }
+                )
     return result
 
 
@@ -89,14 +97,34 @@ def parse_guitarset(root):
         name = mix_audio_path.stem.replace("_mix", "")
         midi_path = midi_dir / f"{name}.mid"
         if midi_path.exists():
-            items.append({
-                "dataset": "guitarset",
-                "mix_audio_path": str(mix_audio_path.resolve()),
-                "midi_path": str(midi_path.resolve())
-            })
+            items.append(
+                {
+                    "dataset": "guitarset",
+                    "mix_audio_path": str(mix_audio_path.resolve()),
+                    "midi_path": str(midi_path.resolve()),
+                }
+            )
     return items
 
 
+def parse_babyslakh(root):
+    # Structure: {name}.{mix.wav, all_src.mid}
+    items = []
+
+    for song_dir in root.iterdir():
+        if not song_dir.is_dir():
+            continue
+        midi_path = song_dir / "all_src.mid"
+        mix_audio_path = song_dir / "mix.wav"
+        if mix_audio_path.exists() and midi_path.exists():
+            items.append(
+                {
+                    "dataset": "babyslakh",
+                    "mix_audio_path": str(mix_audio_path.resolve()),
+                    "midi_path": str(midi_path.resolve()),
+                }
+            )
+    return items
 
 
 def split_items(items, ratios, seed):
@@ -106,8 +134,8 @@ def split_items(items, ratios, seed):
     n_val = int(ratios[1] * n)
     return {
         "train": items[:n_train],
-        "validation": items[n_train:n_train + n_val],
-        "test": items[n_train + n_val:]
+        "validation": items[n_train : n_train + n_val],
+        "test": items[n_train + n_val :],
     }
 
 
@@ -116,7 +144,8 @@ parsers = {
     "urmp": parse_urmp,
     "musicnet": parse_musicnet,
     "slakh2100": parse_slakh2100,
-    "guitarset": parse_guitarset
+    "guitarset": parse_guitarset,
+    "babyslakh": parse_babyslakh,
 }
 
 
@@ -136,7 +165,9 @@ def build_manifest(cfg):
 
         if isinstance(parsed, list):  # unsplit dataset — do full split once
             if dataset_name not in cfg.split:
-                raise ValueError(f"Missing split ratio for unsplit dataset '{dataset_name}'")
+                raise ValueError(
+                    f"Missing split ratio for unsplit dataset '{dataset_name}'"
+                )
             ratios = cfg.split[dataset_name]
             split_result = split_items(parsed, ratios, cfg.seed)
             for split in ["train", "validation", "test"]:
@@ -148,8 +179,9 @@ def build_manifest(cfg):
                     if split in parsed:
                         manifest[split].extend(parsed[split])
                     else:
-                        print(f"Skipping {dataset_name} for '{split}' split (not available)")
-
+                        print(
+                            f"Skipping {dataset_name} for '{split}' split (not available)"
+                        )
 
     return manifest
 
@@ -162,7 +194,7 @@ def main(cfg: DictConfig):
     output = {
         "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "config": OmegaConf.to_container(cfg, resolve=True),
-        "manifest": manifest
+        "manifest": manifest,
     }
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

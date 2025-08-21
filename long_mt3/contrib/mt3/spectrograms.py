@@ -26,32 +26,33 @@ DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_HOP_WIDTH = 128
 DEFAULT_NUM_MEL_BINS = 512
 
-# fixed constants; add these to SpectrogramConfig before changing
+# fixed constants, add these to SpectrogramConfig before changing
 FFT_SIZE = 2048
 MEL_LO_HZ = 20.0
 
 
 @dataclasses.dataclass
 class SpectrogramConfig:
-  """Spectrogram configuration parameters."""
-  sample_rate: int = DEFAULT_SAMPLE_RATE
-  hop_width: int = DEFAULT_HOP_WIDTH
-  num_mel_bins: int = DEFAULT_NUM_MEL_BINS
+    """Spectrogram configuration parameters."""
 
-  @property
-  def abbrev_str(self):
-    s = ''
-    if self.sample_rate != DEFAULT_SAMPLE_RATE:
-      s += 'sr%d' % self.sample_rate
-    if self.hop_width != DEFAULT_HOP_WIDTH:
-      s += 'hw%d' % self.hop_width
-    if self.num_mel_bins != DEFAULT_NUM_MEL_BINS:
-      s += 'mb%d' % self.num_mel_bins
-    return s
+    sample_rate: int = DEFAULT_SAMPLE_RATE
+    hop_width: int = DEFAULT_HOP_WIDTH
+    num_mel_bins: int = DEFAULT_NUM_MEL_BINS
 
-  @property
-  def frames_per_second(self):
-    return self.sample_rate / self.hop_width
+    @property
+    def abbrev_str(self):
+        s = ""
+        if self.sample_rate != DEFAULT_SAMPLE_RATE:
+            s += "sr%d" % self.sample_rate
+        if self.hop_width != DEFAULT_HOP_WIDTH:
+            s += "hw%d" % self.hop_width
+        if self.num_mel_bins != DEFAULT_NUM_MEL_BINS:
+            s += "mb%d" % self.num_mel_bins
+        return s
+
+    @property
+    def frames_per_second(self):
+        return self.sample_rate / self.hop_width
 
 
 def split_audio(audio: np.ndarray, segment_frames: int, hop_frames: int) -> np.ndarray:
@@ -129,6 +130,5 @@ def flatten_frames(spectrogram: np.ndarray) -> np.ndarray:
         raise ValueError(f"Expected 2D or 3D spectrogram, got {spectrogram.shape}")
 
 
-
 def input_depth(spectrogram_config):
-  return spectrogram_config.num_mel_bins
+    return spectrogram_config.num_mel_bins

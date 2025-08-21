@@ -1,6 +1,5 @@
 import os
 import json
-import random
 from typing import List, Dict, Any, Sequence
 from tqdm import tqdm
 from collections import Counter
@@ -21,6 +20,7 @@ from long_mt3.contrib.mt3.note_sequences import (
     NoteEventData,
     NoteEncodingState,
     note_event_data_to_events,
+    note_encoding_state_to_events,
 )
 from long_mt3.contrib.mt3.run_length_encoding import (
     decode_events,
@@ -38,7 +38,6 @@ from train import (
 def _load_manifest(path: str) -> Dict[str, Any]:
     with open(path, "r") as f:
         data = json.load(f)
-
     if "manifest" in data:
         return data["manifest"]
     return data
@@ -53,17 +52,14 @@ def _load_audio_mono(
     if wav.size(0) > 1:
         wav = wav.mean(dim=0, keepdim=True)
     audio = wav.squeeze(0)  # [T]
-
-    # Apply crop in seconds
     start_frame = max(0, int(start_time * target_sr))
     if end_time > 0:
         end_frame = min(audio.numel(), int(end_time * target_sr))
     else:
         end_frame = audio.numel()
     if end_frame < start_frame:
-        end_frame = start_frame  # empty window → empty slice
+        end_frame = start_frame
     audio = audio[start_frame:end_frame]
-
     return audio
 
 
@@ -78,83 +74,12 @@ def _segments_from_spec(spec: np.ndarray, segment_frames: int) -> List[np.ndarra
     return segs
 
 
-def _predict_tokens_for_segments(
-    model: MT3Trainer,
-    segments: List[np.ndarray],
-    device: torch.device,
-    max_len: int,
-    batch_size: int,
-) -> List[List[int]]:
-    preds: List[List[int]] = []
-    model.eval()
-    with torch.no_grad():
-        for i in tqdm(range(0, len(segments), batch_size), desc="Decoding segments"):
-            batch = segments[i : i + batch_size]
-            src = torch.tensor(
-                np.stack(batch, axis=0), dtype=torch.float32, device=device
-            )
-            pred_ids = model.autoregressive_decode(src, src_mask=None, max_len=max_len)
-            for row in pred_ids:
-                toks = row.tolist()
-                if 1 in toks:
-                    toks = toks[: toks.index(1) + 1]
-                preds.append(toks)
-    return preds
-
-
-def _encode_ns_to_tokens(
-    ns: note_seq.NoteSequence, codec, window_seconds: float
-) -> list[int]:
-    # Build per-note events (mirror long_mt3/dataset.py:get_event_times_and_values)
-    event_times = [note.start_time for note in ns.notes]
-    event_values = [
-        NoteEventData(
-            pitch=note.pitch,
-            velocity=note.velocity,
-            program=note.program,
-            is_drum=note.is_drum,
-        )
-        for note in ns.notes
-    ]
-
-    # Frame grid for the whole window (mirror dataset)
-    steps_per_second = codec.steps_per_second
-    num_steps = int(window_seconds * steps_per_second)
-    frame_times = [i / steps_per_second for i in range(num_steps)]
-
-    # Encode events with the same state/spec as training
-    state = NoteEncodingState()
-    events, _, _, _, _ = encode_and_index_events(
-        state=state,
-        event_times=event_times,
-        event_values=event_values,
-        encode_event_fn=note_event_data_to_events,
-        codec=codec,
-        frame_times=frame_times,
-    )
-
-    # Run-length encode shifts (exactly like dataset)
-    rle_fn = run_length_encode_shifts_fn(codec)
-    features = {"targets": events}
-    features = rle_fn(features)
-    events = features["targets"]
-
-    # Clip and append EOS, then shift by NUM_SPECIAL_TOKENS (exactly like dataset)
-    if len(events) >= MAX_LEN:
-        events = events[: MAX_LEN - 1]
-    base_ids = [int(e) + NUM_SPECIAL_TOKENS for e in events]
-    tokens = base_ids + [EOS_TOKEN]
-    return tokens
-
-
 def _decode_tokens_to_ns(all_tokens, codec) -> note_seq.NoteSequence:
-    # Filter to real event ids (strip special-token offset)
     event_tokens = [
         t - NUM_SPECIAL_TOKENS for t in all_tokens if t >= NUM_SPECIAL_TOKENS
     ]
     if not event_tokens:
         return note_seq.NoteSequence()
-
     state = NoteEncodingWithTiesSpec.init_decoding_state_fn()
     NoteEncodingWithTiesSpec.begin_decoding_segment_fn(state)
     decode_events(
@@ -166,28 +91,124 @@ def _decode_tokens_to_ns(all_tokens, codec) -> note_seq.NoteSequence:
         decode_event_fn=NoteEncodingWithTiesSpec.decode_event_fn,
     )
     res = NoteEncodingWithTiesSpec.flush_decoding_state_fn(state)
-
-    # Different versions return different shapes, normalize to NoteSequence
-    if isinstance(res, note_seq.NoteSequence):
-        return res
-    if hasattr(res, "note_sequence"):
-        return res.note_sequence
-    if isinstance(res, dict) and "note_sequence" in res:
-        return res["note_sequence"]
-
-    # Last resort: try to coerce, otherwise raise a helpful error
-    raise TypeError(f"Unexpected flush_decoding_state_fn() return type: {type(res)}")
+    return res["sequence"]
 
 
-def _coerce_devices(d: Any) -> Sequence[int] | int | None:
-    # Accept int, list/tuple of ints, or comma-separated string "0,1"
+def _encode_ns_to_tokens(
+    ns: note_seq.NoteSequence, codec, window_seconds: float
+) -> list[int]:
+    event_times = [note.start_time for note in ns.notes]
+    event_values = [
+        NoteEventData(
+            pitch=note.pitch,
+            velocity=note.velocity,
+            program=note.program,
+            is_drum=note.is_drum,
+        )
+        for note in ns.notes
+    ]
+    steps_per_second = codec.steps_per_second
+    num_steps = int(window_seconds * steps_per_second)
+    frame_times = [i / steps_per_second for i in range(num_steps)]
+    state = NoteEncodingState()
+    NoteEncodingWithTiesSpec.begin_encoding_segment_fn(state)
+    rle_fn = run_length_encode_shifts_fn(codec)
+    features = dict(
+        codec=codec,
+        onsets=event_times,
+        event_values=event_values,
+        frame_times=frame_times,
+    )
+    features = rle_fn(features)
+    events = features["targets"]
+    if len(events) >= MAX_LEN:
+        events = events[: MAX_LEN - 1]
+    base_ids = [int(e) + NUM_SPECIAL_TOKENS for e in events]
+    tokens = base_ids + [EOS_TOKEN]
+    return tokens
+
+
+def _tie_prefix_from_prev_ns(
+    prev_ns: note_seq.NoteSequence, segment_seconds: float, codec
+) -> list[int]:
+    boundary = segment_seconds
+    active = []
+    for n in prev_ns.notes:
+        if getattr(n, "is_drum", False):
+            continue
+        if n.start_time <= boundary and n.end_time > boundary:
+            active.append(n)
+    state = NoteEncodingState()
+    NoteEncodingWithTiesSpec.begin_encoding_segment_fn(state)
+    for n in active:
+        ev = NoteEventData(
+            pitch=n.pitch,
+            velocity=0,
+            program=n.program,
+            is_drum=n.is_drum,
+        )
+        # Spec helper to register tied events for this segment
+        NoteEncodingWithTiesSpec.add_tied_event_fn(state, ev)
+    tie_events = note_encoding_state_to_events(state)
+    tie_ids = [int(codec.encode_event(e)) + NUM_SPECIAL_TOKENS for e in tie_events]
+    return tie_ids
+
+
+def _decode_one_with_prefix(
+    model: MT3Trainer,
+    spec_chunk: np.ndarray,
+    device: torch.device,
+    max_len: int,
+    prefix_ids: list[int],
+) -> list[int]:
+    x = torch.tensor(spec_chunk[None, ...], dtype=torch.float32, device=device)
+    with torch.inference_mode():
+        out = model.autoregressive_decode(
+            x, src_mask=None, max_len=max_len, prefix_ids=prefix_ids
+        )
+        toks = out[0].tolist() if isinstance(out, torch.Tensor) else out[0]
+    if 1 in toks:
+        toks = toks[: toks.index(1) + 1]
+    return toks
+
+
+def _sequential_decode_with_ties(
+    model: MT3Trainer,
+    segments: Sequence[np.ndarray],
+    codec,
+    device: torch.device,
+    max_len: int,
+    segment_seconds: float,
+) -> list[list[int]]:
+    preds: list[list[int]] = []
+    prev_ns: note_seq.NoteSequence = note_seq.NoteSequence()
+    for si, seg in enumerate(segments):
+        prefix = _tie_prefix_from_prev_ns(prev_ns, segment_seconds, codec)
+        toks = _decode_one_with_prefix(
+            model=model,
+            spec_chunk=seg,
+            device=device,
+            max_len=max_len,
+            prefix_ids=prefix,
+        )
+        preds.append(toks)
+        seg_ns = _decode_tokens_to_ns(toks, codec)
+        prev_ns = seg_ns
+    return preds
+
+
+def _coerce_devices(d):
     if d is None:
         return None
     if isinstance(d, int):
         return d
     if isinstance(d, (list, tuple)):
-        return list(map(int, d))
+        return [int(x) for x in d]
+    if isinstance(d, dict):
+        return d
     if isinstance(d, str):
+        if d.strip().lower() == "auto":
+            return "auto"
         parts = [p.strip() for p in d.split(",") if p.strip() != ""]
         if len(parts) == 1:
             try:
@@ -200,144 +221,148 @@ def _coerce_devices(d: Any) -> Sequence[int] | int | None:
 
 def _resolve_device(accelerator: str, devices_spec: Any):
     devices = _coerce_devices(devices_spec)
-
-    # CUDA / GPU
     if accelerator in ("gpu", "cuda") and torch.cuda.is_available():
-        # Respect CUDA_VISIBLE_DEVICES: indices are relative to visible set
         visible = torch.cuda.device_count()
         if visible == 0:
             return torch.device("cpu")
-
-        # int -> number of devices requested (Trainer semantics)
         if isinstance(devices, int):
             if devices <= 0:
                 return torch.device("cuda:0")
             if devices == 1:
                 return torch.device("cuda:0")
-            print(
-                f"[WARN] eval.py is single-process, requested {devices} GPUs. Using cuda:0."
-            )
             return torch.device("cuda:0")
-
-        # list/tuple -> explicit GPU indices
         if isinstance(devices, (list, tuple)) and len(devices) > 0:
-            idx = int(devices[0])
-            if idx < 0 or idx >= visible:
-                raise ValueError(
-                    f"Requested cuda:{idx}, but only {visible} visible device(s)."
-                )
-            return torch.device(f"cuda:{idx}")
-
-        # default
+            return torch.device(
+                f"cuda:{devices[0] if isinstance(devices[0], int) else 0}"
+            )
         return torch.device("cuda:0")
-
-    # Apple Silicon
-    if accelerator == "mps" and torch.backends.mps.is_available():
+    if accelerator in ("mps",) and torch.backends.mps.is_available():
         return torch.device("mps")
-
-    # CPU fallback
     return torch.device("cpu")
 
 
-def _evaluate_example(
-    example: Dict[str, Any],
-    model: MT3Trainer,
-    codec,
-    spec_cfg: SpectrogramConfig,
-    segment_seconds: float,
-    segment_batch_size: int,
-    max_decode_len: int,
-    device: torch.device,
-    start_time: float = 0.0,
-    end_time: float = -1.0,
-    save_midi_dir: str = None,
-    eval_one: bool = False,
-) -> Dict[str, Any]:
-    # Timebase & segmentation
-    sr = spec_cfg.sample_rate
-    hop = spec_cfg.hop_width
-    fps = float(sr) / float(hop)
-    seg_frames = int(segment_seconds * fps)
+def _ns_to_note_arrays(ns, pitch_min=None, pitch_max=None):
+    on, off, pc = [], [], []
+    for n in ns.notes:
+        if getattr(n, "is_drum", False):
+            continue
+        if pitch_min is not None and n.pitch < pitch_min:
+            continue
+        if pitch_max is not None and n.pitch > pitch_max:
+            continue
+        s = max(0.0, float(n.start_time))
+        e = max(s, float(n.end_time))
+        on.append(s)
+        off.append(e)
+        pc.append(int(n.pitch))
+    return np.asarray(on), np.asarray(off), np.asarray(pc)
 
-    # Audio -> spectrogram (cropped)
-    audio = _load_audio_mono(
-        example["mix_audio_path"], sr, start_time=start_time, end_time=end_time
-    )
-    spec = compute_spectrogram(audio.numpy(), spec_cfg)  # [S, F]
 
-    # Segment-level AR decode
-    segments = _segments_from_spec(spec, seg_frames)
-    seg_preds = _predict_tokens_for_segments(
-        model, segments, device, max_len=max_decode_len, batch_size=segment_batch_size
-    )
+def _greedy_match(
+    ref_on,
+    ref_off,
+    ref_p,
+    est_on,
+    est_off,
+    est_p,
+    onset_tol,
+    offset_tol,
+    offset_ratio,
+    need_off,
+):
+    ref_used = np.zeros(len(ref_on), dtype=bool)
+    est_used = np.zeros(len(est_on), dtype=bool)
+    tp = 0
+    for j in np.argsort(est_on):
+        cand = np.where(
+            (~ref_used)
+            & (ref_p == est_p[j])
+            & (np.abs(ref_on - est_on[j]) <= onset_tol)
+        )[0]
+        if cand.size == 0:
+            continue
+        i = cand[np.argmin(np.abs(ref_on[cand] - est_on[j]))]
+        if need_off:
+            ref_dur = max(1e-6, ref_off[i] - ref_on[i])
+            off_tol = max(offset_tol, offset_ratio * ref_dur)
+            if np.abs(ref_off[i] - est_off[j]) > off_tol:
+                continue
+        ref_used[i] = True
+        est_used[j] = True
+        tp += 1
+    fp = int((~est_used).sum())
+    fn = int((~ref_used).sum())
+    return tp, fp, fn
 
-    # Concatenate segment tokens (drop duplicated EOS between segments)
-    flat_tokens: List[int] = []
-    for s, toks in enumerate(seg_preds):
-        if s > 0 and flat_tokens and flat_tokens[-1] == 1 and toks and toks[0] == 1:
-            toks = toks[1:]
-        flat_tokens.extend(toks)
 
-    # Predicted NoteSequence (for metrics/MIDI export)
-    est_ns = _decode_tokens_to_ns(flat_tokens, codec)
+def onset_f1(ref_ns, est_ns, onset_tolerance=0.05):
+    r_on, r_off, r_p = _ns_to_note_arrays(ref_ns)
+    e_on, e_off, e_p = _ns_to_note_arrays(est_ns)
+    if len(r_on) == len(e_on) == 0:
+        return 1.0, 1.0, 1.0
+    if len(e_on) == 0:
+        return 0.0, 0.0, 0.0
+    try:
+        import mir_eval
 
-    # Save predicted MIDI
-    if save_midi_dir:
-        os.makedirs(save_midi_dir, exist_ok=True)
-        mid_base = (
-            example.get("unique_id")
-            or os.path.basename(example.get("midi_path", "pred.mid")).rsplit(".", 1)[0]
+        ref = np.stack([r_on, r_off, r_p], 1)
+        est = np.stack([e_on, e_off, e_p], 1)
+        P, R, F = mir_eval.transcription.precision_recall_f1_overlap(
+            ref, est, onset_tolerance=onset_tolerance, offset_ratio=None
         )
-        mid_name = os.path.join(save_midi_dir, f"pred_{mid_base}.mid")
-        note_seq.sequence_proto_to_midi_file(est_ns, mid_name)
-
-    # Ground-truth crop to SAME window and rebase to 0 for metrics & tokens
-    gt_full = note_seq.midi_file_to_note_sequence(example["midi_path"])
-    gt_crop = _crop_ns_to_window(gt_full, start_time, end_time)
-
-    # Encode GT tokens exactly like training targets (window_seconds from audio)
-    window_seconds = float(audio.numel()) / float(sr)
-    gt_tokens = _encode_ns_to_tokens(gt_crop, codec, window_seconds=window_seconds)
-
-    # Debug snippets: compare Pred vs GT (head & tail)
-    if eval_one:
-        print("[DIAG] pred types:", _type_counts(flat_tokens, codec))
-        print("[DIAG] gt types:", _type_counts(gt_tokens, codec))
-
-        _debug_token_snippets(
-            "Eval Pred (head)", flat_tokens, codec, start=0, length=32
+        return float(P), float(R), float(F)
+    except Exception:
+        tp, fp, fn = _greedy_match(
+            r_on, r_off, r_p, e_on, e_off, e_p, onset_tolerance, 0.0, 0.0, False
         )
-        _debug_token_snippets(
-            "Eval Pred (tail)",
-            flat_tokens,
-            codec,
-            start=max(0, len(flat_tokens) - 32),
-            length=32,
-        )
-        _debug_token_snippets("Eval GT (head)", gt_tokens, codec, start=0, length=32)
-        _debug_token_snippets(
-            "Eval GT (tail)",
-            gt_tokens,
-            codec,
-            start=max(0, len(gt_tokens) - 32),
-            length=32,
-        )
+        P = tp / (tp + fp) if (tp + fp) else 0.0
+        R = tp / (tp + fn) if (tp + fn) else 0.0
+        F = 2 * P * R / (P + R) if (P + R) else 0.0
+        return P, R, F
 
-    # Frame metrics on aligned window
-    is_drum = False
-    ref_roll = get_prettymidi_pianoroll(gt_crop, fps=fps, is_drum=is_drum)
-    est_roll = get_prettymidi_pianoroll(est_ns, fps=fps, is_drum=is_drum)
-    p, r, f1 = frame_metrics(ref_roll, est_roll, velocity_threshold=1)
 
-    row = {
-        "id": example.get("unique_id", example.get("midi_path", "unknown")),
-        "dataset": example.get("dataset", "unknown"),
-        "num_tokens": len(flat_tokens),
-        "frame_precision": float(p),
-        "frame_recall": float(r),
-        "frame_f1": float(f1),
-    }
-    return row
+def onset_offset_f1(
+    ref_ns,
+    est_ns,
+    onset_tolerance=0.05,
+    offset_tolerance=0.05,
+    offset_tolerance_ratio=0.2,
+):
+    r_on, r_off, r_p = _ns_to_note_arrays(ref_ns)
+    e_on, e_off, e_p = _ns_to_note_arrays(est_ns)
+    if len(r_on) == len(e_on) == 0:
+        return 1.0, 1.0, 1.0
+    if len(e_on) == 0:
+        return 0.0, 0.0, 0.0
+    try:
+        import mir_eval
+
+        ref = np.stack([r_on, r_off, r_p], 1)
+        est = np.stack([e_on, e_off, e_p], 1)
+        P, R, F = mir_eval.transcription.precision_recall_f1_overlap(
+            ref,
+            est,
+            onset_tolerance=onset_tolerance,
+            offset_ratio=offset_tolerance_ratio,
+        )
+        return float(P), float(R), float(F)
+    except Exception:
+        tp, fp, fn = _greedy_match(
+            r_on,
+            r_off,
+            r_p,
+            e_on,
+            e_off,
+            e_p,
+            onset_tolerance,
+            offset_tolerance,
+            offset_tolerance_ratio,
+            True,
+        )
+        P = tp / (tp + fp) if (tp + fp) else 0.0
+        R = tp / (tp + fn) if (tp + fn) else 0.0
+        F = 2 * P * R / (P + R) if (P + R) else 0.0
+        return P, R, F
 
 
 def _crop_ns_to_window(
@@ -345,38 +370,26 @@ def _crop_ns_to_window(
 ) -> note_seq.NoteSequence:
     window_end = ns.total_time if end_time < 0 else end_time
     sub = note_seq.extract_subsequence(ns, start_time, window_end)
-
     window_len = max(0.0, window_end - start_time)
     EPS = 1e-6
-
-    # Clamp to [start_time, window_end] first, then rebase to 0
+    rebased = note_seq.NoteSequence()
+    rebased.ticks_per_quarter = sub.ticks_per_quarter
     for n in sub.notes:
-        s = n.start_time
-        e = n.end_time
-        if s < start_time:
-            s = start_time
-        if e < start_time:
-            e = start_time
-        if e > window_end:
-            e = window_end
-        if s > window_end:
-            s = window_end
-        if e < s + EPS:
-            e = s + EPS
-
-        n.start_time = s - start_time
-        n.end_time = e - start_time
-
-    return sub
+        m = rebased.notes.add()
+        m.CopyFrom(n)
+        m.start_time = max(0.0, n.start_time - start_time)
+        m.end_time = max(m.start_time, n.end_time - start_time)
+    rebased.total_time = max(
+        window_len - EPS, max((n.end_time for n in rebased.notes), default=0.0)
+    )
+    return rebased
 
 
-def _debug_token_snippets(
-    name: str, ids: list[int], codec, start: int = 0, length: int = 32
-):
+def _debug_token_snippets(name: str, ids: list[int], codec, start: int, length: int):
     s = start
     e = min(len(ids), start + length)
     if s >= e:
-        print(f"[DEBUG] {name} tokens: <empty>")
+        print(f"[DEBUG] {name}: empty slice")
         return
     ids_snip = ids[s:e]
     dec_snip = []
@@ -401,34 +414,128 @@ def _type_counts(ids: list[int], codec) -> dict[str, int]:
     return dict(c)
 
 
+def _evaluate_example(
+    example: Dict[str, Any],
+    model: MT3Trainer,
+    codec,
+    spec_cfg: SpectrogramConfig,
+    segment_seconds: float,
+    segment_batch_size: int,
+    max_decode_len: int,
+    device: torch.device,
+    start_time: float = 0.0,
+    end_time: float = -1.0,
+    save_midi_dir: str = None,
+    eval_one: bool = False,
+) -> Dict[str, Any]:
+    sr = spec_cfg.sample_rate
+    hop = spec_cfg.hop_width
+    fps = float(sr) / float(hop)
+    seg_frames = int(segment_seconds * fps)
+
+    audio = _load_audio_mono(
+        example["mix_audio_path"], sr, start_time=start_time, end_time=end_time
+    )
+    spec = compute_spectrogram(audio.numpy(), spec_cfg)
+
+    segs = _segments_from_spec(spec, seg_frames)
+
+    pred_token_segments = _sequential_decode_with_ties(
+        model=model,
+        segments=segs,
+        codec=codec,
+        device=device,
+        max_len=max_decode_len,
+        segment_seconds=segment_seconds,
+    )
+
+    flat_tokens: List[int] = []
+    for seg_tokens in pred_token_segments:
+        if flat_tokens and seg_tokens and flat_tokens[-1] == EOS_TOKEN:
+            seg_tokens = [t for t in seg_tokens if t != EOS_TOKEN]
+        flat_tokens.extend(seg_tokens)
+    if not flat_tokens or flat_tokens[-1] != EOS_TOKEN:
+        flat_tokens.append(EOS_TOKEN)
+
+    est_ns = _decode_tokens_to_ns(flat_tokens, codec)
+
+    if save_midi_dir:
+        os.makedirs(save_midi_dir, exist_ok=True)
+        mid_base = (
+            example.get("unique_id")
+            or os.path.basename(example.get("midi_path", "pred.mid")).rsplit(".", 1)[0]
+        )
+        mid_name = os.path.join(save_midi_dir, f"pred_{mid_base}.mid")
+        note_seq.sequence_proto_to_midi_file(est_ns, mid_name)
+
+    gt_full = note_seq.midi_file_to_note_sequence(example["midi_path"])
+    gt_crop = _crop_ns_to_window(gt_full, start_time, end_time)
+
+    window_seconds = float(audio.numel()) / float(sr)
+    gt_tokens = _encode_ns_to_tokens(gt_crop, codec, window_seconds=window_seconds)
+
+    if eval_one:
+        print("[DIAG] pred types:", _type_counts(flat_tokens, codec))
+        print("[DIAG] gt types:", _type_counts(gt_tokens, codec))
+        _debug_token_snippets("Eval Pred (head)", flat_tokens, codec, 0, 32)
+        _debug_token_snippets(
+            "Eval Pred (tail)", flat_tokens, codec, max(0, len(flat_tokens) - 32), 32
+        )
+        _debug_token_snippets("Eval GT   (head)", gt_tokens, codec, 0, 32)
+        _debug_token_snippets(
+            "Eval GT   (tail)", gt_tokens, codec, max(0, len(gt_tokens) - 32), 32
+        )
+
+    is_drum = False
+    ref_roll = get_prettymidi_pianoroll(gt_crop, fps=fps, is_drum=is_drum)
+    est_roll = get_prettymidi_pianoroll(est_ns, fps=fps, is_drum=is_drum)
+    p, r, f1 = frame_metrics(ref_roll, est_roll, velocity_threshold=1)
+    onset_p, onset_r, onset_f = onset_f1(gt_crop, est_ns, onset_tolerance=0.050)
+    oo_p, oo_r, oo_f = onset_offset_f1(
+        gt_crop,
+        est_ns,
+        onset_tolerance=0.050,
+        offset_tolerance=0.050,
+        offset_tolerance_ratio=0.20,
+    )
+
+    row = {
+        "id": example.get("unique_id", example.get("midi_path", "unknown")),
+        "dataset": example.get("dataset", "unknown"),
+        "num_tokens": len(flat_tokens),
+        "frame_precision": float(p),
+        "frame_recall": float(r),
+        "frame_f1": float(f1),
+        "onset_precision": float(onset_p),
+        "onset_recall": float(onset_r),
+        "onset_f1": float(onset_f),
+        "onset_offset_precision": float(oo_p),
+        "onset_offset_recall": float(oo_r),
+        "onset_offset_f1": float(oo_f),
+    }
+    return row
+
+
 @hydra.main(config_path="configs", config_name="config", version_base=None)
 def main(cfg: DictConfig):
-    # Build codec & spectrogram config to match training
     vocab_cfg = VocabularyConfig()
     codec = build_codec(vocab_cfg, event_types=cfg.data.event_types)
     spec_cfg = SpectrogramConfig(**cfg.data.spectrogram_config)
 
-    # Load Lightning checkpoint
-    ckpt_path = cfg.eval.checkpoint
-    assert os.path.isfile(ckpt_path), f"Missing checkpoint: {ckpt_path}"
+    ckpt_path = cfg.train.resume_from_checkpoint
+    assert ckpt_path and os.path.exists(ckpt_path), f"Missing checkpoint: {ckpt_path}"
+    device = _resolve_device(cfg.train.accelerator, cfg.train.devices)
 
-    device = _resolve_device(
-        accelerator=cfg.eval.accelerator,
-        devices_spec=cfg.eval.devices,
+    model = MT3Trainer.load_from_checkpoint(
+        ckpt_path, map_location=device, strict=False
     )
-    print(f"[INFO] Using device: {device}")
-
-    # Recreate model from checkpoint, pass runtime codec
-    model: MT3Trainer = MT3Trainer.load_from_checkpoint(ckpt_path, codec=codec)
-    model.to(device)
     model.eval()
+    model.to(device)
 
-    # Resolve version dir for outputs
     version_dir = os.path.abspath(os.path.join(os.path.dirname(ckpt_path), ".."))
     out_dir = os.path.join(version_dir, "eval_one" if cfg.eval.eval_one else "eval")
     os.makedirs(out_dir, exist_ok=True)
 
-    # Load manifest and choose split
     manifest = _load_manifest(cfg.data.manifest_path)
     if not cfg.data.overfit_one:
         test_split = (
@@ -444,7 +551,6 @@ def main(cfg: DictConfig):
         )
     assert len(test_split) > 0, "No 'test' (or 'validation') split found in manifest."
 
-    # Either eval one example or the whole set
     if cfg.eval.eval_one:
         ex = test_split[0]
         row = _evaluate_example(
@@ -462,11 +568,11 @@ def main(cfg: DictConfig):
             eval_one=cfg.eval.eval_one,
         )
         df = pd.DataFrame([row])
-        df.to_csv(os.path.join(out_dir, "results_eval_one.csv"), index=False)
-        print(f"Wrote {len(df)} example to {out_dir}")
+        df.to_csv(os.path.join(out_dir, "results.csv"), index=False)
+        print(df.head())
+        print(f"Wrote 1 example to {out_dir}")
         return
 
-    # Full-set evaluation
     rows: List[Dict[str, Any]] = []
     for ex in test_split:
         rows.append(

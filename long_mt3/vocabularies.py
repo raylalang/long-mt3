@@ -33,13 +33,13 @@ def build_codec(
     Args:
         config: VocabularyConfig with settings like steps_per_second and num_velocity_bins.
         event_types: List of event types to include in the vocabulary.
-                     Valid options: "program", "pitch", "velocity", "drum", "tie", "end_tie", "velocity".
+                     Valid options: "program", "pitch", "velocity", "drum", "tie", "velocity".
 
     Returns:
         event_codec.Codec instance defining the vocabulary.
     """
     if event_types is None:
-        event_types = ["pitch", "program", "drum", "tie", "end_tie", "velocity"]
+        event_types = ["pitch", "program", "drum", "tie", "velocity"]
 
     event_ranges = [
         event_codec.EventRange(

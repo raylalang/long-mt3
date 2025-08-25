@@ -25,6 +25,120 @@ from .contrib.mt3.note_sequences import (
 )
 
 MAX_LEN = 2048
+PITCH_MIN = 21
+PITCH_MAX = 108
+NUM_PITCHES = PITCH_MAX - PITCH_MIN + 1
+
+
+def _estimate_qpm(ns: note_seq.NoteSequence, default_qpm: float = 120.0) -> float:
+    if hasattr(ns, "tempos") and len(ns.tempos) > 0 and ns.tempos[0].qpm > 0:
+        return float(ns.tempos[0].qpm)
+    return float(default_qpm)
+
+
+def _build_frame_labels(
+    ns: note_seq.NoteSequence, frames: int, fps: float
+) -> torch.Tensor:
+    y = torch.zeros(frames, NUM_PITCHES, dtype=torch.float32)
+    for n in ns.notes:
+        p = int(n.pitch) - PITCH_MIN
+        if p < 0 or p >= NUM_PITCHES:
+            continue
+        s = int(max(0, round(n.start_time * fps)))
+        e = int(min(frames, round(n.end_time * fps)))
+        if e > s:
+            y[s:e, p] = 1.0
+    return y
+
+
+def _build_onset_offset_labels(
+    ns: note_seq.NoteSequence, frames: int, fps: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    onset = torch.zeros(frames, NUM_PITCHES, dtype=torch.float32)
+    offset = torch.zeros(frames, NUM_PITCHES, dtype=torch.float32)
+    for n in ns.notes:
+        p = int(n.pitch) - PITCH_MIN
+        if p < 0 or p >= NUM_PITCHES:
+            continue
+        s = int(max(0, round(n.start_time * fps)))
+        e = int(min(frames, round(n.end_time * fps)))
+        if s < frames:
+            onset[s, p] = 1.0
+        if e - 1 >= 0:
+            offset[max(0, e - 1), p] = 1.0
+    return onset, offset
+
+
+def _build_velocity_bins(
+    ns: note_seq.NoteSequence, frames: int, fps: float, num_bins: int = 32
+) -> torch.Tensor:
+    """
+    Discretize MIDI velocities at note onsets into [0, num_bins-1]; -1 elsewhere.
+    """
+    vel = torch.full((frames, NUM_PITCHES), -1, dtype=torch.long)
+    for n in ns.notes:
+        p = int(n.pitch) - PITCH_MIN
+        if p < 0 or p >= NUM_PITCHES:
+            continue
+        s = int(max(0, round(n.start_time * fps)))
+        if s >= frames:
+            continue
+        bin_idx = int(round((n.velocity / 127.0) * (num_bins - 1)))
+        bin_idx = max(0, min(num_bins - 1, bin_idx))
+        vel[s, p] = bin_idx
+    return vel
+
+
+def _build_beats_and_targets(
+    ns: note_seq.NoteSequence,
+    segment_seconds: float,
+    frames: int,
+    fps: float,
+    default_beats: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    qpm = _estimate_qpm(ns)
+    beat_period = 60.0 / qpm
+    num_beats_est = max(1, int(round(segment_seconds / beat_period)))
+    # cap to a reasonable range; pad/collate will handle variable length
+    M = max(1, min(num_beats_est, 64))
+
+    # beat boundaries in seconds, rebased to [0, segment_seconds)
+    starts = [i * beat_period for i in range(M)]
+    ends = [min(segment_seconds, (i + 1) * beat_period) for i in range(M)]
+    # if tempos are missing, ensure coverage of the window
+    if M == 1 and segment_seconds > beat_period * 1.5:
+        M = default_beats
+        starts = [i * (segment_seconds / M) for i in range(M)]
+        ends = [min(segment_seconds, (i + 1) * (segment_seconds / M)) for i in range(M)]
+
+    # map to frame indices
+    bounds = torch.zeros(M, 2, dtype=torch.long)
+    for i in range(M):
+        s = int(max(0, round(starts[i] * fps)))
+        e = int(min(frames, round(ends[i] * fps)))
+        if e <= s:
+            e = min(frames, s + 1)
+        bounds[i, 0] = s
+        bounds[i, 1] = e
+
+    # beat targets: normalized signed offset of note onsets from beat center in [-0.5, 0.5]
+    # mean across onsets within each beat; empty beats -> 0.0
+    centers = [(starts[i] + ends[i]) * 0.5 for i in range(M)]
+    durations = [max(1e-6, (ends[i] - starts[i])) for i in range(M)]
+    onsets = [float(n.start_time) for n in ns.notes]
+    targets = torch.zeros(M, dtype=torch.float32)
+    for i in range(M):
+        cs = centers[i]
+        dur = durations[i]
+        # collect onsets inside this beat
+        local = [t for t in onsets if starts[i] <= t < ends[i]]
+        if not local:
+            targets[i] = 0.0
+        else:
+            # signed distance to center normalized by beat duration
+            vals = [max(-0.5, min(0.5, (t - cs) / dur)) for t in local]
+            targets[i] = float(np.mean(vals)) if len(vals) > 0 else 0.0
+    return bounds, targets
 
 
 class MT3Dataset(Dataset):
@@ -224,9 +338,37 @@ class MT3Dataset(Dataset):
                         tensor,
                     )
 
-        return spec, decoder_input_ids, decoder_target_ids
+        # labels and beat targets
+        frame_labels = _build_frame_labels(ns, self.segment_frames, frames_per_second)
 
-    # --- helpers -------------------------------------------------------------
+        # Framewise onset/offset/velocity labels aligned to the same window
+        onset_labels, offset_labels = _build_onset_offset_labels(
+            ns=ns, frames=self.segment_frames, fps=frames_per_second
+        )
+        velocity_bins = _build_velocity_bins(
+            ns=ns, frames=self.segment_frames, fps=frames_per_second, num_bins=32
+        )
+
+        # ns here is already cropped and rebased to the window above
+        beat_bounds, beat_targets = _build_beats_and_targets(
+            ns=ns,
+            segment_seconds=(end_time - start_time),
+            frames=self.segment_frames,
+            fps=frames_per_second,
+            default_beats=16,
+        )
+
+        return {
+            "spec": spec,  # [T, F]
+            "decoder_input_ids": decoder_input_ids,  # [L]
+            "decoder_target_ids": decoder_target_ids,  # [L]
+            "beat_bounds": beat_bounds,  # [M, 2] in frame indices
+            "frame_labels": frame_labels,  # [T, 88]
+            "beat_targets": beat_targets,  # [M]
+            "onset_labels": onset_labels,  # [T, 88] float {0,1}
+            "offset_labels": offset_labels,  # [T, 88] float {0,1}
+            "velocity_bins": velocity_bins,  # [T, 88] long in [-1..V-1]
+        }
 
     def load_audio(self, path):
         import torchaudio

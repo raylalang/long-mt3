@@ -1,0 +1,8 @@
+# U-Net front-end, no fusion
+model:
+  fusion:
+    enabled: false
+  frontend:
+    type: unet
+    in_ch: 1
+    base: 32

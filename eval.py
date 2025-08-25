@@ -459,6 +459,115 @@ def _evaluate_example(
 
     est_ns = _decode_tokens_to_ns(flat_tokens, codec)
 
+    # auxiliary loss evaluation on the evaluation window
+    aux_logs = {}
+    with torch.no_grad():
+        # encoder embeddings for the full window
+        spec_tensor = torch.tensor(
+            spec[None, ...], dtype=torch.float32, device=device
+        )  # [1, T, F]
+        feat = (
+            model.model.frontend(spec_tensor)
+            if getattr(model.model, "frontend", None) is not None
+            else spec_tensor
+        )
+        memory = model.model.encoder(feat)  # [1, T, D]
+
+        # build frame labels from GT crop at eval FPS to match spectrogram T
+        sr = spec_cfg.sample_rate
+        hop = spec_cfg.hop_width
+        fps_eval = float(sr) / float(hop)
+
+        # frame labels: [T, 88]
+        def _frame_labels_eval(ns_local):
+            T = spec.shape[0]
+            y = torch.zeros(T, 88, dtype=torch.float32, device=device)
+            for n in ns_local.notes:
+                p = int(n.pitch) - 21
+                if p < 0 or p >= 88:
+                    continue
+                s = int(max(0, round(n.start_time * fps_eval)))
+                e = int(min(T, round(n.end_time * fps_eval)))
+                if e > s:
+                    y[s:e, p] = 1.0
+            return y
+
+        fl_eval = _frame_labels_eval(gt_crop)  # [T,88]
+
+        beat_bounds_eval = None
+        beat_targets_eval = None
+        if model.model.fusion is not None:
+            # derive beats from GT window
+            def _estimate_qpm_eval(ns_local, default_qpm=120.0):
+                if (
+                    hasattr(ns_local, "tempos")
+                    and len(ns_local.tempos) > 0
+                    and ns_local.tempos[0].qpm > 0
+                ):
+                    return float(ns_local.tempos[0].qpm)
+                return float(default_qpm)
+
+            qpm = _estimate_qpm_eval(gt_crop)
+            beat_period = 60.0 / qpm
+            window_seconds = float(spec.shape[0]) / fps_eval
+            M = max(1, int(round(window_seconds / beat_period)))
+            starts = [i * beat_period for i in range(M)]
+            ends = [min(window_seconds, (i + 1) * beat_period) for i in range(M)]
+            bounds = torch.zeros(1, M, 2, dtype=torch.long, device=device)
+            centers = []
+            durs = []
+            for i in range(M):
+                s = int(max(0, round(starts[i] * fps_eval)))
+                e = int(min(spec.shape[0], round(ends[i] * fps_eval)))
+                if e <= s:
+                    e = min(spec.shape[0], s + 1)
+                bounds[0, i, 0] = s
+                bounds[0, i, 1] = e
+                centers.append((starts[i] + ends[i]) * 0.5)
+                durs.append(max(1e-6, ends[i] - starts[i]))
+            # targets from GT onsets
+            onsets = [float(n.start_time) for n in gt_crop.notes]
+            targets = torch.zeros(1, M, dtype=torch.float32, device=device)
+            for i in range(M):
+                cs = centers[i]
+                dur = durs[i]
+                local = [t for t in onsets if starts[i] <= t < ends[i]]
+                if local:
+                    vals = [max(-0.5, min(0.5, (t - cs) / dur)) for t in local]
+                    targets[0, i] = float(np.mean(vals))
+            beat_bounds_eval = bounds  # [1,M,2]
+            beat_targets_eval = targets  # [1,M]
+
+            # fusion forward to get beat embeddings
+            memory, beat_emb, _ = model.model.fusion(
+                frame_emb=memory,
+                beat_bounds=bounds[0],
+                beats_per_bar=model.model.beats_per_bar,
+                frame_mask=None,
+            )
+        # heads and losses
+        if hasattr(model.model, "frame_head") and model.model.frame_head is not None:
+            frame_logits = model.model.frame_head(memory)  # [1,T,88]
+            if fl_eval is not None:
+                bce = torch.nn.functional.binary_cross_entropy_with_logits(
+                    frame_logits, fl_eval.unsqueeze(0)
+                )
+                aux_logs["eval_frame_bce"] = float(bce.item())
+            aux_logs["frame_pred_shape"] = tuple(frame_logits.shape)
+
+        if (
+            beat_bounds_eval is not None
+            and hasattr(model.model, "beat_head")
+            and model.model.beat_head is not None
+        ):
+            beat_pred = model.model.beat_head(beat_emb)  # [1,M,1] or [1,M]
+            if beat_pred.dim() == 3 and beat_pred.size(-1) == 1:
+                beat_pred = beat_pred.squeeze(-1)
+            if beat_targets_eval is not None:
+                l1 = torch.nn.functional.l1_loss(beat_pred, beat_targets_eval)
+                aux_logs["eval_beat_l1"] = float(l1.item())
+            aux_logs["beat_pred_shape"] = tuple(beat_pred.shape)
+
     if save_midi_dir:
         os.makedirs(save_midi_dir, exist_ok=True)
         mid_base = (
@@ -513,6 +622,7 @@ def _evaluate_example(
         "onset_offset_recall": float(oo_r),
         "onset_offset_f1": float(oo_f),
     }
+    row.update(aux_logs)
     return row
 
 

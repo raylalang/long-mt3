@@ -1,0 +1,12 @@
+# U-Net + frame/beat/bar fusion (vanilla MHA)
+model:
+  fusion:
+    enabled: true
+    attn_kind: vanilla   # swap to "performer" or "perceiver" for ablations
+    beats_per_bar: 4
+    pos_dim: 32
+    pool_mode: mean
+  frontend:
+    type: unet
+    in_ch: 1
+    base: 32

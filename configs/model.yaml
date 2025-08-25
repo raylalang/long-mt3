@@ -4,3 +4,13 @@ model:
   dim_feedforward: 2048
   num_layers: 8
   dropout: 0.1
+  fusion:
+    enabled: true
+    attn_kind: vanilla
+    beats_per_bar: 4
+    pos_dim: 32
+    pool_mode: mean
+    num_pitches: 88
+  frontend:
+    type: unet
+    in_ch: 1

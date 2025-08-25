@@ -1,0 +1,6 @@
+# No U-Net, no fusion
+model:
+  fusion:
+    enabled: false
+  frontend:
+    type: null

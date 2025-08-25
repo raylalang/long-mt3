@@ -77,37 +77,43 @@ class MT3Trainer(pl.LightningModule):
             f"[DEBUG] Output layer bias stats: min={bias.min().item()}, max={bias.max().item()}, mean={bias.mean().item()}"
         )
 
-    def forward(self, src, tgt, src_key_padding_mask=None, tgt_key_padding_mask=None):
-        return self.model(
-            src,
-            tgt,
-            src_key_padding_mask=src_key_padding_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask,
+    def forward(self, batch):
+        out = self.model(
+            src=batch["spec"],
+            src_key_padding_mask=batch["spec_mask"],
+            beat_bounds=batch.get("beat_bounds"),
+            targets=batch.get("targets"),
+            tgt=batch.get("decoder_input_ids"),
+            tgt_key_padding_mask=batch.get("in_mask"),
         )
+        return out
 
     def training_step(self, batch, batch_idx):
-        (
-            src,
-            decoder_input_ids,
-            decoder_target_ids,
-            src_mask,
-            input_mask,
-            target_mask,
-        ) = batch
+        out = self.forward(batch)
+        aux_losses = out["loss_terms"]
+        logits = out["decoder_logits"]
 
-        logits = self(
-            src,
-            decoder_input_ids,
-            src_key_padding_mask=src_mask,
-            tgt_key_padding_mask=input_mask,
-        )
+        loss = 0.0
+        if logits is not None:
+            loss = self.loss_fn(
+                logits.reshape(-1, logits.shape[-1]),
+                batch["decoder_target_ids"].reshape(-1),
+            )
+        loss_weights = {
+            "frame": 1.0,
+            "onset": 1.0,
+            "offset": 1.0,
+            "velocity": 0.5,
+            "beat": 0.2,
+            "beat_reg": 0.1,
+        }
+        for name, l in aux_losses.items():
+            w = loss_weights.get(name, 1.0)
+            loss = loss + w * l
+            self.log(f"train_{name}", l, on_epoch=True, prog_bar=False, sync_dist=True)
 
-        loss = self.loss_fn(
-            logits.reshape(-1, logits.shape[-1]), decoder_target_ids.reshape(-1)
-        )
-
-        pred_ids = logits.argmax(dim=-1)
-        tgt_ids = decoder_target_ids
+        pred_ids = logits.argmax(dim=-1) if logits is not None else None
+        tgt_ids = batch["decoder_target_ids"]
 
         if self.debug and batch_idx == 0:
             self.print(f"[DEBUG] logits shape: {logits.shape}")
@@ -121,7 +127,7 @@ class MT3Trainer(pl.LightningModule):
                 f"[DEBUG] decoder_target_ids min/max: {tgt_ids.min().item()} / {tgt_ids.max().item()}"
             )
             self.print(
-                f"[DEBUG] Logits first token stats: min={logits[0,0].min().item():.4f}, max={logits[0,0].max().item():.4f}, mean={logits[0,0].mean().item():.4f}"
+                f"[DEBUG] Logits first token stats: min={logits[0,0].min().item():.4f}, max={logits[0,0].max().item():.4f}, mean={logits[0,0].mean().item():.4f}",
             )
 
             debug_range = slice(0, min(200, pred_ids.shape[1], tgt_ids.shape[1]))
@@ -158,32 +164,25 @@ class MT3Trainer(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        (
-            src,
-            decoder_input_ids,
-            decoder_target_ids,
-            src_mask,
-            input_mask,
-            target_mask,
-        ) = batch
+        out = self.forward(batch)
+        aux_losses = out["loss_terms"]
+        logits = out["decoder_logits"]
 
-        logits = self(
-            src,
-            decoder_input_ids,
-            src_key_padding_mask=src_mask,
-            tgt_key_padding_mask=input_mask,
-        )
+        loss = 0.0
+        if logits is not None:
+            loss = self.loss_fn(
+                logits.reshape(-1, logits.shape[-1]),
+                batch["decoder_target_ids"].reshape(-1),
+            )
+        for name, l in aux_losses.items():
+            loss = loss + l
+            self.log(f"val_{name}", l, on_epoch=True, prog_bar=False, sync_dist=True)
 
-        loss = self.loss_fn(
-            logits.reshape(-1, logits.shape[-1]), decoder_target_ids.reshape(-1)
-        )
-
-        # one big decoded print per epoch
         if (self.debug or batch_idx == 0) and not self.ar_decoded_this_epoch:
             self.ar_decoded_this_epoch = True
 
             pred_ids = logits.argmax(dim=-1)
-            tgt_ids = decoder_target_ids
+            tgt_ids = batch["decoder_target_ids"]
 
             debug_range = slice(0, min(200, pred_ids.shape[1], tgt_ids.shape[1]))
             self.print(f"[DEBUG] Validation Batch {batch_idx}")
@@ -204,7 +203,9 @@ class MT3Trainer(pl.LightningModule):
             was_training = self.training
             self.eval()
             with torch.no_grad():
-                ar_pred = self.autoregressive_decode(src[0:1], src_mask[0:1])
+                ar_pred = self.autoregressive_decode(
+                    batch["spec"][0:1], batch["spec_mask"][0:1]
+                )
             if was_training:
                 self.train()
             self.print(
@@ -258,21 +259,44 @@ class MT3Trainer(pl.LightningModule):
         ), "Expect src of shape [1, S, F] for eval."
         device = src.device
 
-        def _forward(src_tensor: torch.Tensor, tgt_in: torch.Tensor):
-            out = None
-            if hasattr(self, "forward"):
-                try:
-                    out = self.forward(src_tensor, tgt_in)
-                except TypeError:
-                    out = None
-            if out is None and hasattr(self, "model"):
-                out = self.model(src_tensor, tgt_in)
-            if out is None and hasattr(self, "net"):
-                out = self.net(src_tensor, tgt_in)
-            # Unwrap dicts like {"logits": ...}
-            if isinstance(out, dict):
-                out = out.get("logits", out.get("logit", out))
-            return out  # expected shape [B=1, T, V]
+        def _forward(src_tensor, tgt_in):
+            B, S, F = src_tensor.shape
+            # Build uniform beat grid as fallback
+            M = 32
+            step = max(1, S // M)
+            starts = torch.arange(0, S, step, device=src_tensor.device)
+            ends = torch.clamp(starts + step, max=S)
+            beat_bounds = torch.stack([starts, ends], dim=-1)
+            if beat_bounds.size(0) == 0:
+                beat_bounds = torch.tensor([[0, max(1, S)]], device=src_tensor.device)
+            beat_bounds = beat_bounds.unsqueeze(0)  # [1, M', 2]
+
+            # frontend -> encoder
+            feat = (
+                self.model.frontend(src_tensor)
+                if getattr(self.model, "frontend", None) is not None
+                else src_tensor
+            )
+            memory = self.model.encoder(feat, src_key_padding_mask=None)
+
+            # fusion if available
+            if getattr(self.model, "fusion", None) is not None:
+                memory, _, _ = self.model.fusion(
+                    memory, beat_bounds, frame_pad_mask=None
+                )
+
+            # decoder step
+            tgt_mask = self.model.generate_square_subsequent_mask(
+                tgt_in.size(1), device=src_tensor.device
+            )
+            logits = self.model.decoder(
+                tgt=tgt_in,
+                memory=memory,
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=None,
+                memory_key_padding_mask=None,
+            )
+            return logits
 
         ids: list[int] = list(prefix_ids or [])
         assert len(ids) > 0, "prefix_ids must be provided (tie-section) for decoding."
@@ -338,6 +362,7 @@ def main(cfg: DictConfig):
         "dim_feedforward": cfg.model.dim_feedforward,
         "num_layers": cfg.model.num_layers,
         "dropout": cfg.model.dropout,
+        "fusion": cfg.model.get("fusion", {}),
     }
 
     model = MT3Trainer(

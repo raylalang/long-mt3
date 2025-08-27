@@ -23,7 +23,7 @@ def get_vocab_size():
         return 512
 
 
-USE_LTA = True  # set False if you want smaller UNet base without attention
+USE_LTA = True
 
 
 def run_len(T):

@@ -78,7 +78,7 @@ class MT3DataPipeline(pl.LightningDataModule):
             print(f"Loaded {len(self.dataset[split])} samples for {split} split.")
 
     def collate_fn(self, batch):
-        specs = [b["src"] for b in batch]
+        specs = [b["spec"] for b in batch]
         in_ids = [b["decoder_input_ids"] for b in batch]
         tgt_ids = [b["decoder_target_ids"] for b in batch]
 

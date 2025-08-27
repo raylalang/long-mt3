@@ -109,8 +109,8 @@ class MT3Model(nn.Module):
         input_dim,
         vocab_size,
         d_model=512,
-        nhead=6,
-        dim_feedforward=1024,
+        nhead=8,
+        dim_feedforward=2048,
         num_layers=8,
         dropout=0.1,
         fusion=None,
@@ -119,7 +119,11 @@ class MT3Model(nn.Module):
     ):
         super().__init__()
         self.frontend = None
-        if frontend and frontend.get("type", "").lower() == "unet":
+        if (
+            frontend
+            and frontend.get("type", None)
+            and frontend.get("type", "").lower() == "unet"
+        ):
             self.frontend = UNetEncoder(
                 in_ch=frontend.get("in_ch", 1),
                 base=frontend.get("base", 32),
@@ -168,7 +172,7 @@ class MT3Model(nn.Module):
 
     def forward(
         self,
-        src,  # [B, T, F] spectrogram if using UNet; else [B, T, d_in]
+        src,  # [B, T, fF] spectrogram if using UNet; else [B, T, d_in]
         src_key_padding_mask=None,  # [B, T]
         beat_bounds=None,  # [B, M, 2] int indices
         targets: dict | None = None,  # optional targets dict
@@ -278,3 +282,9 @@ class MT3Model(nn.Module):
         out["decoder_logits"] = logits
         out["loss_terms"] = losses
         return out
+
+    def generate_square_subsequent_mask(self, sz, device=None):
+        mask = torch.triu(torch.full((sz, sz), float("-inf")), diagonal=1)
+        if device is not None:
+            mask = mask.to(device)
+        return mask

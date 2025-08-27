@@ -12,15 +12,15 @@ from .contrib.mt3.spectrograms import compute_spectrogram
 from .contrib.mt3.run_length_encoding import (
     encode_and_index_events,
     run_length_encode_shifts_fn,
-    note_encoding_state_to_events,
-    note_sequence_to_onsets_and_offsets_and_programs,
 )
 from .contrib.mt3.event_codec import Event
 from .contrib.mt3.note_sequences import (
     NoteEncodingState,
     NoteEventData,
     note_event_data_to_events,
+    note_encoding_state_to_events,
     validate_note_sequence,
+    note_sequence_to_onsets_and_offsets_and_programs,
     trim_overlapping_notes,
 )
 
@@ -359,7 +359,7 @@ class MT3Dataset(Dataset):
         )
 
         return {
-            "spec": spec,  # [T, F]
+            "spec": spec,  # [T, f]
             "decoder_input_ids": decoder_input_ids,  # [L]
             "decoder_target_ids": decoder_target_ids,  # [L]
             "beat_bounds": beat_bounds,  # [M, 2] in frame indices

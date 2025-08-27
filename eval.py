@@ -307,18 +307,18 @@ def onset_f1(ref_ns, est_ns, onset_tolerance=0.05):
 
         ref = np.stack([r_on, r_off, r_p], 1)
         est = np.stack([e_on, e_off, e_p], 1)
-        P, R, F = mir_eval.transcription.precision_recall_f1_overlap(
+        P, R, f = mir_eval.transcription.precision_recall_f1_overlap(
             ref, est, onset_tolerance=onset_tolerance, offset_ratio=None
         )
-        return float(P), float(R), float(F)
+        return float(P), float(R), float(f)
     except Exception:
         tp, fp, fn = _greedy_match(
             r_on, r_off, r_p, e_on, e_off, e_p, onset_tolerance, 0.0, 0.0, False
         )
         P = tp / (tp + fp) if (tp + fp) else 0.0
         R = tp / (tp + fn) if (tp + fn) else 0.0
-        F = 2 * P * R / (P + R) if (P + R) else 0.0
-        return P, R, F
+        f = 2 * P * R / (P + R) if (P + R) else 0.0
+        return P, R, f
 
 
 def onset_offset_f1(
@@ -339,13 +339,13 @@ def onset_offset_f1(
 
         ref = np.stack([r_on, r_off, r_p], 1)
         est = np.stack([e_on, e_off, e_p], 1)
-        P, R, F = mir_eval.transcription.precision_recall_f1_overlap(
+        P, R, f = mir_eval.transcription.precision_recall_f1_overlap(
             ref,
             est,
             onset_tolerance=onset_tolerance,
             offset_ratio=offset_tolerance_ratio,
         )
-        return float(P), float(R), float(F)
+        return float(P), float(R), float(f)
     except Exception:
         tp, fp, fn = _greedy_match(
             r_on,
@@ -361,8 +361,8 @@ def onset_offset_f1(
         )
         P = tp / (tp + fp) if (tp + fp) else 0.0
         R = tp / (tp + fn) if (tp + fn) else 0.0
-        F = 2 * P * R / (P + R) if (P + R) else 0.0
-        return P, R, F
+        f = 2 * P * R / (P + R) if (P + R) else 0.0
+        return P, R, f
 
 
 def _crop_ns_to_window(
@@ -465,7 +465,7 @@ def _evaluate_example(
         # encoder embeddings for the full window
         spec_tensor = torch.tensor(
             spec[None, ...], dtype=torch.float32, device=device
-        )  # [1, T, F]
+        )  # [1, T, f]
         feat = (
             model.model.frontend(spec_tensor)
             if getattr(model.model, "frontend", None) is not None

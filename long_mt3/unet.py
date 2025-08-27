@@ -39,7 +39,7 @@ class UNetEncoder(nn.Module):
         self.use_local_time = True
         self._hfa = None
         self._lta = LocalTimeAttention(
-            d_model=base * 8, nhead=4, max_radius=16, dropout=dropout
+            d_model=base, nhead=4, max_radius=16, dropout=dropout
         )
         self.up3 = nn.ConvTranspose2d(base * 8, base * 4, 2, stride=2)
         self.dec3 = _conv_block(base * 8, base * 4, dropout)
@@ -49,7 +49,7 @@ class UNetEncoder(nn.Module):
         self.dec1 = _conv_block(base * 2, base, dropout)
         self.out_proj = nn.Linear(base, d_model)
 
-    def forward(self, spec):  # spec: [B, F, T] or [B, 1, F, T]
+    def forward(self, spec):  # spec: [B, f, T] or [B, 1, f, T]
         if spec.ndim == 3:
             spec = spec.unsqueeze(1)
         x1 = self.enc1(spec)
@@ -57,11 +57,11 @@ class UNetEncoder(nn.Module):
         x3 = self.enc3(self.pool(x2))
         xb = self.bottleneck(self.pool(x3))
         if self.use_harmonic:
-            B, C, F, T = xb.shape
-            # lazy-init with actual F
+            B, C, f, T = xb.shape
+            # lazy-init with actual f
             if self._hfa is None:
                 self._hfa = HarmonicFrequencyAttention(
-                    freq_bins=F,
+                    freq_bins=f,
                     d_model=C,
                     nhead=4,
                     Q=12,
@@ -69,14 +69,31 @@ class UNetEncoder(nn.Module):
                     Kmax=8,
                     dropout=0.1,
                 ).to(xb.device)
-            # [B,C,F,T] -> [B,T,F,C]
+            # [B,C,f,T] -> [B,T,f,C]
             xb_perm = xb.permute(0, 3, 2, 1).contiguous()
-            xb_h = self._hfa(xb_perm)  # [B,T,F,C]
-            xb = xb_h.permute(0, 3, 2, 1).contiguous()  # back to [B,C,F,T]
-        y3 = self.dec3(torch.cat([self.up3(xb), x3], dim=1))
-        y2 = self.dec2(torch.cat([self.up2(y3), x2], dim=1))
-        y1 = self.dec1(torch.cat([self.up1(y2), x1], dim=1))
-        # collapse freq dim with conv features -> frame embedding per time step
+            xb_h = self._hfa(xb_perm)  # [B,T,f,C]
+            xb = xb_h.permute(0, 3, 2, 1).contiguous()  # back to [B,C,f,T]
+
+        u3 = self.up3(xb)
+        if u3.shape[-2:] != x3.shape[-2:]:
+            u3 = F.interpolate(
+                u3, size=x3.shape[-2:], mode="bilinear", align_corners=False
+            )
+        y3 = self.dec3(torch.cat([u3, x3], dim=1))
+
+        u2 = self.up2(y3)
+        if u2.shape[-2:] != x2.shape[-2:]:
+            u2 = F.interpolate(
+                u2, size=x2.shape[-2:], mode="bilinear", align_corners=False
+            )
+        y2 = self.dec2(torch.cat([u2, x2], dim=1))
+
+        u1 = self.up1(y2)
+        if u1.shape[-2:] != x1.shape[-2:]:
+            u1 = F.interpolate(
+                u1, size=x1.shape[-2:], mode="bilinear", align_corners=False
+            )
+        y1 = self.dec1(torch.cat([u1, x1], dim=1))
 
         if self.use_local_time:
             # first get [B,T,C] tokens by mean over freq

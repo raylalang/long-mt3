@@ -209,7 +209,7 @@ def _harmonic_offsets(
 class HarmonicFrequencyAttention(nn.Module):
     """
     Self-attention across FREQUENCY bins (per frame), masked to emphasize harmonic relations.
-    Input x: [B, T, F, D]  -> Output: same shape.
+    Input x: [B, T, f, D]  -> Output: same shape.
     """
 
     def __init__(
@@ -226,7 +226,7 @@ class HarmonicFrequencyAttention(nn.Module):
         self.attn = nn.MultiheadAttention(
             d_model, nhead, batch_first=True, dropout=dropout
         )
-        # Build additive attention mask [F, F]
+        # Build additive attention mask [f, f]
         M = torch.full((freq_bins, freq_bins), float("-inf"))
         for f0 in range(freq_bins):
             for o in _harmonic_offsets(Q, anchors, Kmax):
@@ -236,10 +236,10 @@ class HarmonicFrequencyAttention(nn.Module):
         self.register_buffer("mask", M)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, F, D = x.shape
-        y = x.view(B * T, F, D)
+        B, T, f, D = x.shape
+        y = x.view(B * T, f, D)
         out, _ = self.attn(y, y, y, attn_mask=self.mask, need_weights=False)
-        return out.view(B, T, F, D)
+        return out.view(B, T, f, D)
 
 
 class LocalTimeAttention(nn.Module):

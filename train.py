@@ -199,18 +199,29 @@ class MT3Trainer(pl.LightningModule):
                 f"[DEBUG] Validation Decoded Target   [100:200]: {self.decode_event_ids(tgt_ids[0][debug_range])}"
             )
 
-            # Autoregressive decoding probe (eval-only)
-            was_training = self.training
-            self.eval()
-            with torch.no_grad():
-                ar_pred = self.autoregressive_decode(
-                    batch["spec"][0:1], batch["spec_mask"][0:1]
+            # Autoregressive decoding probe (eval-only) — run only if prefix exists
+            prefix = batch.get("decoder_input_ids")
+            if prefix is not None and prefix.size(0) > 0 and prefix.size(1) > 0:
+                prefix_ids = prefix[0].tolist()
+                was_training = self.training
+                self.eval()
+                with torch.no_grad():
+                    ar_pred = self.autoregressive_decode(
+                        batch["spec"][0:1],
+                        (
+                            batch.get("spec_mask", None)[0:1]
+                            if batch.get("spec_mask") is not None
+                            else None
+                        ),
+                        prefix_ids=prefix_ids,
+                    )
+                if was_training:
+                    self.train()
+                self.print(
+                    f"[DEBUG] Autoregressive Prediction: {self.decode_event_ids(torch.tensor(ar_pred[0][debug_range]))}"
                 )
-            if was_training:
-                self.train()
-            self.print(
-                f"[DEBUG] Autoregressive Prediction: {self.decode_event_ids(torch.tensor(ar_pred[0][debug_range]))}"
-            )
+            else:
+                self.print("[DEBUG] Skipping AR probe: no decoder prefix in batch.")
 
         self.log(
             "val_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True, logger=True
@@ -244,7 +255,7 @@ class MT3Trainer(pl.LightningModule):
 
     def autoregressive_decode(
         self,
-        src: torch.Tensor,  # [1, S, F] spectrogram
+        src: torch.Tensor,  # [1, S, f] spectrogram
         src_mask: torch.Tensor = None,
         max_len: int = 2048,
         prefix_ids: list[int] | None = None,
@@ -256,11 +267,11 @@ class MT3Trainer(pl.LightningModule):
         """
         assert (
             src.dim() == 3 and src.size(0) == 1
-        ), "Expect src of shape [1, S, F] for eval."
+        ), "Expect src of shape [1, S, f] for eval."
         device = src.device
 
         def _forward(src_tensor, tgt_in):
-            B, S, F = src_tensor.shape
+            B, S, f = src_tensor.shape
             # Build uniform beat grid as fallback
             M = 32
             step = max(1, S // M)
@@ -272,11 +283,11 @@ class MT3Trainer(pl.LightningModule):
             beat_bounds = beat_bounds.unsqueeze(0)  # [1, M', 2]
 
             # frontend -> encoder
-            feat = (
-                self.model.frontend(src_tensor)
-                if getattr(self.model, "frontend", None) is not None
-                else src_tensor
-            )
+            if getattr(self.model, "frontend", None) is not None:
+                feat = self.model.frontend(src_tensor.transpose(1, 2))
+            else:
+                feat = src_tensor
+
             memory = self.model.encoder(feat, src_key_padding_mask=None)
 
             # fusion if available
@@ -362,6 +373,7 @@ def main(cfg: DictConfig):
         "dim_feedforward": cfg.model.dim_feedforward,
         "num_layers": cfg.model.num_layers,
         "dropout": cfg.model.dropout,
+        "frontend": cfg.model.get("frontend", {}),
         "fusion": cfg.model.get("fusion", {}),
     }
 

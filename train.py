@@ -424,6 +424,7 @@ def main(cfg: DictConfig):
         enable_model_summary=True,
     )
     trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.train.ckpt_path)
+    print("Training complete!")
 
 
 if __name__ == "__main__":

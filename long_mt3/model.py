@@ -129,6 +129,8 @@ class MT3Model(nn.Module):
                 base=frontend.get("base", 32),
                 dropout=dropout,
                 d_model=d_model,
+                use_harmonic=frontend.get("use_harmonic", False),
+                use_local_time=frontend.get("use_local_time", True),
             )
         self.encoder = MT3Encoder(
             input_dim if self.frontend is None else d_model,
@@ -175,8 +177,8 @@ class MT3Model(nn.Module):
         src,  # [B, T, fF] spectrogram if using UNet; else [B, T, d_in]
         src_key_padding_mask=None,  # [B, T]
         beat_bounds=None,  # [B, M, 2] int indices
-        targets: dict | None = None,  # optional targets dict
-        tgt=None,  # [B, L] decoder input ids (optional)
+        targets: dict | None = None,  # targets dict
+        tgt=None,  # [B, L] decoder input ids
         tgt_key_padding_mask=None,  # [B, L]
     ):
         # frontend -> encoder
@@ -191,7 +193,6 @@ class MT3Model(nn.Module):
             frame_tokens, src_key_padding_mask=src_key_padding_mask
         )  # [B, T, d_model]
 
-        # optional fusion
         if self.fusion is not None and beat_bounds is not None:
             frame_refined, beat_refined, bar_emb = self.fusion(
                 memory, beat_bounds, src_key_padding_mask
@@ -250,7 +251,6 @@ class MT3Model(nn.Module):
                 p = self.offset_head(frame_refined, None)
             out["offset_probs"] = p
 
-        # velocity (optional)
         if self.vel_head is not None:
             if (
                 targets is not None

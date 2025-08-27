@@ -20,7 +20,15 @@ def _conv_block(c_in, c_out, p=0.1):
 class UNetEncoder(nn.Module):
     """2D U-Net over (freq,time) spectrograms -> framewise embeddings."""
 
-    def __init__(self, in_ch=1, base=32, dropout=0.1, d_model=512):
+    def __init__(
+        self,
+        in_ch=1,
+        base=32,
+        dropout=0.1,
+        d_model=512,
+        use_harmonic=False,
+        use_local_time=False,
+    ):
         super().__init__()
         self.enc1 = _conv_block(in_ch, base, dropout)
         self.enc2 = _conv_block(base, base * 2, dropout)
@@ -35,8 +43,8 @@ class UNetEncoder(nn.Module):
             nn.BatchNorm2d(base * 8),
             nn.GELU(),
         )
-        self.use_harmonic = True
-        self.use_local_time = True
+        self.use_harmonic = use_harmonic
+        self.use_local_time = use_local_time
         self._hfa = None
         self._lta = LocalTimeAttention(
             d_model=base, nhead=4, max_radius=16, dropout=dropout

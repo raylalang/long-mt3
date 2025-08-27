@@ -37,22 +37,25 @@ def _estimate_qpm(ns: note_seq.NoteSequence, default_qpm: float = 120.0) -> floa
 
 
 def _build_frame_labels(
-    ns: note_seq.NoteSequence, frames: int, fps: float
+    ns: note_seq.NoteSequence, frames: int, fps: float, start_time: float
 ) -> torch.Tensor:
     y = torch.zeros(frames, NUM_PITCHES, dtype=torch.float32)
     for n in ns.notes:
         p = int(n.pitch) - PITCH_MIN
         if p < 0 or p >= NUM_PITCHES:
             continue
-        s = int(max(0, round(n.start_time * fps)))
-        e = int(min(frames, round(n.end_time * fps)))
+        s = int(round((n.start_time - start_time) * fps))
+        e = int(round((n.end_time - start_time) * fps))
+        # clamp and guard
+        s = max(0, min(frames - 1, s))
+        e = max(0, min(frames, e))
         if e > s:
             y[s:e, p] = 1.0
     return y
 
 
 def _build_onset_offset_labels(
-    ns: note_seq.NoteSequence, frames: int, fps: float
+    ns: note_seq.NoteSequence, frames: int, fps: float, start_time: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
     onset = torch.zeros(frames, NUM_PITCHES, dtype=torch.float32)
     offset = torch.zeros(frames, NUM_PITCHES, dtype=torch.float32)
@@ -60,17 +63,24 @@ def _build_onset_offset_labels(
         p = int(n.pitch) - PITCH_MIN
         if p < 0 or p >= NUM_PITCHES:
             continue
-        s = int(max(0, round(n.start_time * fps)))
-        e = int(min(frames, round(n.end_time * fps)))
-        if s < frames:
+        s = int(round((n.start_time - start_time) * fps))
+        e = int(round((n.end_time - start_time) * fps))
+        # clamp and guard
+        s = max(0, min(frames - 1, s))
+        e = max(0, min(frames, e))
+        if 0 <= s < frames:
             onset[s, p] = 1.0
-        if e - 1 >= 0:
-            offset[max(0, e - 1), p] = 1.0
+        if 0 <= e - 1 < frames:
+            offset[e - 1, p] = 1.0
     return onset, offset
 
 
 def _build_velocity_bins(
-    ns: note_seq.NoteSequence, frames: int, fps: float, num_bins: int = 32
+    ns: note_seq.NoteSequence,
+    frames: int,
+    fps: float,
+    start_time: float,
+    num_bins: int = 32,
 ) -> torch.Tensor:
     """
     Discretize MIDI velocities at note onsets into [0, num_bins-1]; -1 elsewhere.
@@ -80,8 +90,8 @@ def _build_velocity_bins(
         p = int(n.pitch) - PITCH_MIN
         if p < 0 or p >= NUM_PITCHES:
             continue
-        s = int(max(0, round(n.start_time * fps)))
-        if s >= frames:
+        s = int(round((n.start_time - start_time) * fps))
+        if not (0 <= s < frames):
             continue
         bin_idx = int(round((n.velocity / 127.0) * (num_bins - 1)))
         bin_idx = max(0, min(num_bins - 1, bin_idx))
@@ -94,6 +104,7 @@ def _build_beats_and_targets(
     segment_seconds: float,
     frames: int,
     fps: float,
+    start_time: float,
     default_beats: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     qpm = _estimate_qpm(ns)
@@ -125,7 +136,7 @@ def _build_beats_and_targets(
     # mean across onsets within each beat; empty beats -> 0.0
     centers = [(starts[i] + ends[i]) * 0.5 for i in range(M)]
     durations = [max(1e-6, (ends[i] - starts[i])) for i in range(M)]
-    onsets = [float(n.start_time) for n in ns.notes]
+    onsets = [float(n.start_time - start_time) for n in ns.notes]
     targets = torch.zeros(M, dtype=torch.float32)
     for i in range(M):
         cs = centers[i]
@@ -339,14 +350,23 @@ class MT3Dataset(Dataset):
                     )
 
         # labels and beat targets
-        frame_labels = _build_frame_labels(ns, self.segment_frames, frames_per_second)
+        frame_labels = _build_frame_labels(
+            ns, self.segment_frames, frames_per_second, start_time
+        )
 
         # Framewise onset/offset/velocity labels aligned to the same window
         onset_labels, offset_labels = _build_onset_offset_labels(
-            ns=ns, frames=self.segment_frames, fps=frames_per_second
+            ns=ns,
+            frames=self.segment_frames,
+            fps=frames_per_second,
+            start_time=start_time,
         )
         velocity_bins = _build_velocity_bins(
-            ns=ns, frames=self.segment_frames, fps=frames_per_second, num_bins=32
+            ns=ns,
+            frames=self.segment_frames,
+            fps=frames_per_second,
+            start_time=start_time,
+            num_bins=32,
         )
 
         # ns here is already cropped and rebased to the window above
@@ -355,6 +375,7 @@ class MT3Dataset(Dataset):
             segment_seconds=(end_time - start_time),
             frames=self.segment_frames,
             fps=frames_per_second,
+            start_time=start_time,
             default_beats=16,
         )
 

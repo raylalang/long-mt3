@@ -9,6 +9,6 @@ CUDA_VISIBLE_DEVICES=4 python3 train.py \
   train.accelerator=gpu \
   train.devices=1 \
   train.precision=32 \
-  +train.label_smoothing=0.1 \
+  +train.label_smoothing=0.02 \
   +train.gradient_clip_val=1.0 \
   data.batch_size_per_device=16

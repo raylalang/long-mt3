@@ -25,7 +25,7 @@ COMMON=(
   train.devices=1
   train.early_stop_patience=-1
   train.debug=true
-  train.tb_logger=True
+  train.tb_logger=true
 )
 
 echo "[1/3] Baseline (no UNet, no fusion)"

@@ -7,6 +7,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 import time
 import numpy as np
+from collections import Counter
 
 import torch
 import torch.nn as nn
@@ -67,6 +68,15 @@ class MT3Trainer(pl.LightningModule):
             None: self.ALL_EVENT_IDS,
         }
 
+        min_idx, max_idx = self.codec.event_type_range("shift")
+        vocab_dim = self.model.decoder.out_proj.out_features
+        mask = torch.zeros(vocab_dim, dtype=torch.bool, device=self.device)
+        shift_ids = torch.arange(min_idx, max_idx + 1, device=self.device) + NUM_SPECIAL_TOKENS
+        mask[shift_ids] = True
+        self.register_buffer("shift_id_mask", mask, persistent=False)
+
+        self.shift_loss_weight = getattr(self.hparams, "shift_loss_weight", 0.2)
+
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN, label_smoothing=label_smoothing)
 
     def on_fit_start(self):
@@ -96,10 +106,26 @@ class MT3Trainer(pl.LightningModule):
 
         loss = 0.0
         if logits is not None:
-            loss = self.loss_fn(
-                logits.reshape(-1, logits.shape[-1]),
-                batch["decoder_target_ids"].reshape(-1),
-            )
+            # loss = self.loss_fn(
+            #     logits.reshape(-1, logits.shape[-1]),
+            #     batch["decoder_target_ids"].reshape(-1),
+            # )
+            logits_flat = logits.reshape(-1, logits.shape[-1])
+            targets = batch["decoder_target_ids"]        # [B, T]
+            ce = nn.functional.cross_entropy(
+                logits_flat, targets.reshape(-1),
+                ignore_index=PAD_TOKEN, reduction="none",
+                label_smoothing=self.hparams.label_smoothing,
+            ).view_as(targets)
+            # keep tokens up to and including the first EOS per sequence
+            eos_id = EOS_TOKEN
+            cumsums = (targets == eos_id).cumsum(dim=1)
+            keep = (cumsums <= 1) & (targets != PAD_TOKEN)
+            # loss = (ce[keep]).mean()
+            weights = torch.ones_like(ce)
+            weights = torch.where(self.shift_id_mask[targets], self.shift_loss_weight * weights, weights)
+            loss = ( (ce * weights)[keep] ).sum() / (weights[keep].sum().clamp_min(1))
+
         loss_weights = {
             "frame": 1.0,
             "onset": 1.0,
@@ -116,7 +142,7 @@ class MT3Trainer(pl.LightningModule):
         pred_ids = logits.argmax(dim=-1) if logits is not None else None
         tgt_ids = batch["decoder_target_ids"]
 
-        if self.debug and batch_idx == 0:
+        if self.debug and batch_idx == 0 and logits is not None:
             self.print(f"[DEBUG] logits shape: {logits.shape}")
             self.print(f"[DEBUG] decoder_target_ids shape: {tgt_ids.shape}")
             self.print(f"[DEBUG] logits argmax (first sample): {pred_ids[0]}")
@@ -129,6 +155,9 @@ class MT3Trainer(pl.LightningModule):
             )
             self.print(
                 f"[DEBUG] Logits first token stats: min={logits[0,0].min().item():.4f}, max={logits[0,0].max().item():.4f}, mean={logits[0,0].mean().item():.4f}",
+            )
+            self.print(
+                f"[DEBUG] Most common decoder_target_ids: {Counter(tgt_ids).most_common(20)}"
             )
 
             debug_range = slice(0, min(200, pred_ids.shape[1], tgt_ids.shape[1]))
@@ -171,10 +200,26 @@ class MT3Trainer(pl.LightningModule):
 
         loss = 0.0
         if logits is not None:
-            loss = self.loss_fn(
-                logits.reshape(-1, logits.shape[-1]),
-                batch["decoder_target_ids"].reshape(-1),
-            )
+            # loss = self.loss_fn(
+            #     logits.reshape(-1, logits.shape[-1]),
+            #     batch["decoder_target_ids"].reshape(-1),
+            # )
+            logits_flat = logits.reshape(-1, logits.shape[-1])
+            targets = batch["decoder_target_ids"]        # [B, T]
+            ce = nn.functional.cross_entropy(
+                logits_flat, targets.reshape(-1),
+                ignore_index=PAD_TOKEN, reduction="none",
+                label_smoothing=self.hparams.label_smoothing,
+            ).view_as(targets)
+            # keep tokens up to and including the first EOS per sequence
+            eos_id = EOS_TOKEN
+            cumsums = (targets == eos_id).cumsum(dim=1)
+            keep = (cumsums <= 1) & (targets != PAD_TOKEN)
+            # loss = (ce[keep]).mean()
+            weights = torch.ones_like(ce)
+            weights = torch.where(self.shift_id_mask[targets], self.shift_loss_weight * weights, weights)
+            loss = ( (ce * weights)[keep] ).sum() / (weights[keep].sum().clamp_min(1))
+        
         for name, l in aux_losses.items():
             loss = loss + l
             self.log(f"val_{name}", l, on_epoch=True, prog_bar=False, sync_dist=True)
@@ -203,7 +248,8 @@ class MT3Trainer(pl.LightningModule):
             # Autoregressive decoding probe (eval-only) — run only if prefix exists
             prefix = batch.get("decoder_input_ids")
             if prefix is not None and prefix.size(0) > 0 and prefix.size(1) > 0:
-                prefix_ids = prefix[0].tolist()
+                full = prefix[0].tolist()
+                prefix_ids = full[: max(1, min(2, len(full)))]  # use 1–2 tokens
                 was_training = self.training
                 self.eval()
                 with torch.no_grad():
@@ -289,12 +335,12 @@ class MT3Trainer(pl.LightningModule):
             else:
                 feat = src_tensor
 
-            memory = self.model.encoder(feat, src_key_padding_mask=None)
+            memory = self.model.encoder(feat, src_key_padding_mask=src_mask)
 
             # fusion if available
             if getattr(self.model, "fusion", None) is not None:
                 memory, _, _ = self.model.fusion(
-                    memory, beat_bounds, frame_pad_mask=None
+                    memory, beat_bounds, frame_pad_mask=src_mask
                 )
 
             # decoder step
@@ -323,8 +369,29 @@ class MT3Trainer(pl.LightningModule):
                     )
                 if isinstance(logits, (list, tuple)):
                     logits = logits[0]
-                # Take last step’s logits and pick argmax
-                next_id = int(torch.argmax(logits[:, -1, :], dim=-1).item())
+                # Take last step’s logits and constrain by ALLOW table before argmax
+                last_logits = logits[:, -1, :].squeeze(0)  # [V]
+
+                # Determine last non-special event type from generated ids
+                last_type = None
+                for tok in reversed(ids):
+                    if tok >= NUM_SPECIAL_TOKENS:
+                        ev = self.codec.decode_event_index(tok - NUM_SPECIAL_TOKENS)
+                        last_type = getattr(ev, "type", None)
+                        break
+
+                # Allowed ids: always include EOS, then apply transition table
+                allowed_ids = set([EOS_TOKEN])
+                allowed_ids |= self.ALLOW.get(last_type, self.ALL_EVENT_IDS)
+
+                # Mask logits outside allowed set
+                mask = torch.full_like(last_logits, float("-inf"))
+                # Convert set -> list for advanced indexing
+                mask[list(allowed_ids)] = 0.0
+                constrained = last_logits + mask
+
+                # Greedy pick under constraints
+                next_id = int(torch.argmax(constrained, dim=-1).item())
                 ids.append(next_id)
 
                 if next_id == EOS_TOKEN:

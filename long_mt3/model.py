@@ -14,6 +14,14 @@ from .losses import (
     sum_losses,
 )
 from .unet import UNetEncoder
+from .vocabularies import (
+    build_codec,
+    VocabularyConfig,
+    PAD_TOKEN,
+    EOS_TOKEN,
+    UNK_TOKEN,
+    NUM_SPECIAL_TOKENS,
+)
 
 MAX_LEN = 2048
 
@@ -65,7 +73,7 @@ class MT3Decoder(nn.Module):
         self, vocab_size, d_model, nhead, dim_feedforward, num_layers, dropout=0.1
     ):
         super().__init__()
-        self.embed = nn.Embedding(vocab_size, d_model)
+        self.embed = nn.Embedding(vocab_size, d_model, padding_idx=PAD_TOKEN)
         self.pos_decoder = PositionalEncoding(d_model, max_len=MAX_LEN)
         self.decoder_layers = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(

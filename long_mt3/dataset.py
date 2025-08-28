@@ -12,6 +12,7 @@ from .contrib.mt3.spectrograms import compute_spectrogram
 from .contrib.mt3.run_length_encoding import (
     encode_and_index_events,
     run_length_encode_shifts_fn,
+    remove_redundant_state_changes_fn
 )
 from .contrib.mt3.event_codec import Event
 from .contrib.mt3.note_sequences import (
@@ -290,6 +291,12 @@ class MT3Dataset(Dataset):
         rle_fn = run_length_encode_shifts_fn(self.codec)
         features = {"targets": events}
         features = rle_fn(features)
+        dedup = remove_redundant_state_changes_fn(
+            codec=self.codec,
+            feature_key="targets",
+            state_change_event_types=("velocity", "program", "drum"),
+        )
+        features = dedup(features)
         events = features["targets"]
 
         # clip + add EOS

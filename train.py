@@ -27,7 +27,8 @@ torch.backends.cudnn.benchmark = True
 
 
 class MT3Trainer(pl.LightningModule):
-    def __init__(self, model_config, learning_rate, codec, debug=False):
+    def __init__(self, model_config, codec, learning_rate,
+                 label_smoothing=0.0, debug=False):
         super().__init__()
         self.save_hyperparameters()
         self.model = MT3Model(**model_config)
@@ -66,7 +67,7 @@ class MT3Trainer(pl.LightningModule):
             None: self.ALL_EVENT_IDS,
         }
 
-        self.loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN)
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN, label_smoothing=label_smoothing)
 
     def on_fit_start(self):
         self.print_output_bias()
@@ -379,8 +380,9 @@ def main(cfg: DictConfig):
 
     model = MT3Trainer(
         model_config=model_config,
-        learning_rate=cfg.train.learning_rate,
         codec=codec,
+        learning_rate=cfg.train.learning_rate,
+        label_smoothing=cfg.train.get("label_smoothing", 0.0),
         debug=cfg.train.debug,
     )
     # model = torch.compile(model)
@@ -421,6 +423,7 @@ def main(cfg: DictConfig):
         enable_progress_bar=True,
         num_sanity_val_steps=0,
         log_every_n_steps=10 if not cfg.train.debug else 1,
+        gradient_clip_val=cfg.train.get("gradient_clip_val", 0.0),
         enable_model_summary=True,
     )
     trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.train.ckpt_path)

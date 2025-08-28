@@ -3,7 +3,7 @@ data:
 
   batch_size_per_device: 16
   num_workers: 8
-  segment_seconds: 2.048
+  segment_seconds: 12.288
   temperature: 0.3
 
   spectrogram_config:

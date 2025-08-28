@@ -5,8 +5,8 @@ train:
   precision: "16-mixed"
 
   accelerator: gpu
-  devices: [0,2,4,6]
-  strategy: ddp
+  devices: 1
+  strategy: auto
 
   ckpt_path: null
   debug: false

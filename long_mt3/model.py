@@ -147,7 +147,7 @@ class MT3Model(nn.Module):
         self.frame_head = FrameBCEHead(
             d_model, num_pitches=fusion.get("num_pitches", 88)
         )
-        self.beat_head = BeatSnapHead(d_model)
+        
         # conditional multi-task heads
         tasks = {} if tasks is None else tasks
         self.onset_head = OnsetBCEHead(d_model) if tasks.get("onset", True) else None
@@ -160,6 +160,7 @@ class MT3Model(nn.Module):
 
         # fusion
         if fusion and fusion.get("enabled", False):
+            self.beat_head = BeatSnapHead(d_model)
             self.fusion = CrossScaleFusion(
                 d_model=d_model,
                 nhead=nhead,
@@ -170,6 +171,7 @@ class MT3Model(nn.Module):
                 pool_mode=fusion.get("pool_mode", "mean"),
             )
         else:
+            self.beat_head = None
             self.fusion = None
 
     def forward(
@@ -263,8 +265,8 @@ class MT3Model(nn.Module):
                 p = self.vel_head(frame_refined, None)
             out["velocity_probs"] = p  # [B,T,88,V]
 
-        # beat head + regularizer (only when we had beat tokens)
-        if beat_refined is not None:
+        # beat head + regularizer 
+        if (self.beat_head is not None) and (beat_refined is not None):
             if (
                 targets is not None
                 and "beat_center" in targets

@@ -20,6 +20,7 @@ from .contrib.mt3.note_sequences import (
     note_event_data_to_events,
     note_encoding_state_to_events,
     validate_note_sequence,
+    note_sequence_to_onsets_and_offsets,
     note_sequence_to_onsets_and_offsets_and_programs,
     trim_overlapping_notes,
 )
@@ -194,7 +195,6 @@ class MT3Dataset(Dataset):
 
         if idx in cache:
             spec, ns = cache[idx]
-            print("[DEBUG] Cache hit!")
         else:
             sample = self.data_list[idx]
             audio = self.load_audio(sample["mix_audio_path"])
@@ -415,10 +415,12 @@ class MT3Dataset(Dataset):
                 m.CopyFrom(n)
                 m.start_time = max(0.0, n.start_time - start_time)
                 m.end_time = max(0.0, n.end_time - start_time)
-        # Build onsetoffset events (with programs / drums)
-        event_times, event_values = note_sequence_to_onsets_and_offsets_and_programs(
-            seg
-        )
+        
+        # Build onsetoffset events
+        # event_times, event_values = note_sequence_to_onsets_and_offsets_and_programs(
+        #     seg
+        # )
+        event_times, event_values = note_sequence_to_onsets_and_offsets(seg)
         return event_times, event_values
 
 

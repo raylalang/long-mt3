@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# nohup bash ./scripts/maestro/run_train_maestro_vanilla.sh > run_train_maestro_vanilla.log 2>&1 &
+# nohup bash ./scripts/maestro/run_train_maestro_fusion.sh > run_train_maestro_fusion.log 2>&1 &
 
-CUDA_VISIBLE_DEVICES=4 python3 train.py \
+CUDA_VISIBLE_DEVICES=5 python3 train.py \
   data.manifest_path=manifests/manifest_20250827_181509.json \
-  model.fusion.enabled=false \
-  model.frontend.type=null \
+  model.fusion.enabled=true \
+  model.frontend.type=unet \
+  model.fusion.beats_per_bar=4 \
   train.accelerator=gpu \
   train.devices=1 \
   train.precision=32 \

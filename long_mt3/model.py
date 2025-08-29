@@ -27,20 +27,33 @@ MAX_LEN = 2048
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len):
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 2048):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.pe = pe.unsqueeze(0)  # shape (1, max_len, d_model)
+        self.d_model = int(d_model)
+        self.dropout = nn.Dropout(p=dropout)
+        self.register_buffer("pe", self._build_pe(max_len), persistent=False)
 
-    def forward(self, x):
-        # x: (batch, seq_len, d_model)
-        return x + self.pe[:, : x.size(1)].to(x.device)
+    def _build_pe(self, length: int) -> torch.Tensor:
+        position = torch.arange(length, dtype=torch.float32).unsqueeze(1)  # [L, 1]
+        div_term = torch.exp(
+            torch.arange(0, self.d_model, 2, dtype=torch.float32)
+            * (-math.log(10000.0) / self.d_model)
+        )  # [d_model/2]
+        pe = torch.zeros(1, length, self.d_model, dtype=torch.float32)
+        pe[0, :, 0::2] = torch.sin(position * div_term)  # even
+        pe[0, :, 1::2] = torch.cos(position * div_term)  # odd
+        return pe
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        L = x.size(1)
+        # Auto-extend the buffer if the target length exceeds current capacity
+        if L > self.pe.size(1):
+            new_len = L
+            new_pe = self._build_pe(new_len)
+            # keep buffer semantics; move to same device/dtype as x on use
+            self.register_buffer("pe", new_pe, persistent=False)
+        pe = self.pe[:, :L].to(device=x.device, dtype=x.dtype)
+        return self.dropout(x + pe)
 
 
 class MT3Encoder(nn.Module):

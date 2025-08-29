@@ -82,15 +82,22 @@ class MT3Trainer(pl.LightningModule):
         else:
             self.PROG_FORBID = []
 
+        # Program ids allowed at decode time (respect whitelist if present)
+        if len(self.PROG_IDS) > 0:
+            self.PROG_ALLOWED = sorted(list(self.PROG_IDS - set(self.PROG_FORBID))) if len(self.PROG_FORBID) > 0 else sorted(list(self.PROG_IDS))
+        else:
+            self.PROG_ALLOWED = []
+
         # Build transition table
+        base_start = set(self.VEL_IDS) | (set(self.PROG_ALLOWED) if len(self.PROG_ALLOWED) > 0 else set())
         self.ALLOW = {
-            "program": self.VEL_IDS,
-            "velocity": self.PITCH_IDS | self.DRUM_IDS,
-            "pitch": self.PROG_IDS | self.VEL_IDS | self.SHIFT_IDS,
-            "drum": self.PROG_IDS | self.VEL_IDS | self.SHIFT_IDS,
-            "shift": self.PROG_IDS | self.VEL_IDS | self.PITCH_IDS | self.DRUM_IDS,
-            "tie": self.PROG_IDS | self.VEL_IDS | self.PITCH_IDS | self.DRUM_IDS,
-            None: self.ALL_EVENT_IDS,
+            None: base_start,
+            "shift": base_start | set(self.SHIFT_IDS),  # allow SHIFT→SHIFT for very long gaps
+            "tie": set(self.SHIFT_IDS),
+            "program": set(self.VEL_IDS),
+            "velocity": set(self.PITCH_IDS) | set(self.DRUM_IDS),
+            "pitch": set(self.PITCH_IDS) | set(self.SHIFT_IDS),
+            "drum": set(self.VEL_IDS) | set(self.SHIFT_IDS),  # mirrors pitch path if drums enabled
         }
         if not self.hparams.allow_drums:
             # strip drums from every transition
@@ -423,15 +430,20 @@ class MT3Trainer(pl.LightningModule):
                         last_type = getattr(ev, "type", None)
                         break
 
-                # Allowed ids: always include EOS, then apply transition table
+                # Allowed ids from strict table + EOS; respect program whitelist
                 allowed_ids = set([EOS_TOKEN])
-                allowed_ids |= self.ALLOW.get(last_type, self.ALL_EVENT_IDS)
+                allowed_core = set(self.ALLOW.get(last_type, set()))
+                if len(self.PROG_ALLOWED) > 0 and (allowed_core & self.PROG_IDS):
+                    allowed_core = (allowed_core - self.PROG_IDS) | set(self.PROG_ALLOWED)
+                allowed_ids |= allowed_core
 
                 # Mask logits outside allowed set
                 mask = torch.full_like(last_logits, float("-inf"))
                 # Convert set -> list for advanced indexing
                 mask[list(allowed_ids)] = 0.0
                 constrained = last_logits + mask
+                if self.forbid_idx.numel() > 0:
+                    constrained.index_fill_(0, self.forbid_idx, float("-inf"))
 
                 # Greedy pick under constraints
                 next_id = int(torch.argmax(constrained, dim=-1).item())

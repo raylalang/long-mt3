@@ -116,10 +116,10 @@ def _encode_ns_to_tokens(
     num_steps = max(1, num_steps)
     frame_times = [i / steps_per_second for i in range(num_steps)]
 
-    # Initialize encoding state per your NoteEncodingWithTiesSpec
+    # Initialize encoding state
     state = NoteEncodingWithTiesSpec.init_encoding_state_fn()
 
-    # Encode + index with the exact API your module defines
+    # Encode + index
     events, event_start_indices, event_end_indices, state_events, state_event_indices = (
         encode_and_index_events(
             state=state,
@@ -132,7 +132,7 @@ def _encode_ns_to_tokens(
         )
     )
 
-    # Run-length encode shifts using your helper (expects features["targets"])
+    # Run-length encode shifts
     rle = run_length_encode_shifts_fn(codec)
     features = {"targets": events}
     features = rle(features)
@@ -180,8 +180,8 @@ def _decode_one_with_prefix(
             x, src_mask=None, max_len=max_len, prefix_ids=prefix_ids
         )
         toks = out[0].tolist() if isinstance(out, torch.Tensor) else out[0]
-    if 1 in toks:
-        toks = toks[: toks.index(1) + 1]
+    if EOS_TOKEN in toks:
+        toks = toks[: toks.index(EOS_TOKEN) + 1]
     return toks
 
 
@@ -286,7 +286,7 @@ def _segments_tokens_to_ns(
     combined = note_seq.NoteSequence()
     prev_ns = note_seq.NoteSequence()
     for si, seg_tokens in enumerate(token_segments):
-        # Recreate the tie prefix (same logic you used for generation)
+        # Recreate the tie prefix
         tie_ids = _tie_prefix_from_prev_ns(prev_ns, segment_seconds, codec) if si > 0 else []
         toks_for_decode = tie_ids + seg_tokens
         # Decode this segment at its absolute offset
@@ -357,6 +357,7 @@ def onset_f1(ref_ns, est_ns, onset_tolerance=0.05):
         )
         return float(P), float(R), float(f)
     except Exception:
+        print("Error occurred while doing mir_eval, using fallback method _greedy_match")
         tp, fp, fn = _greedy_match(
             r_on, r_off, r_p, e_on, e_off, e_p, onset_tolerance, 0.0, 0.0, False
         )
@@ -728,11 +729,13 @@ def main(cfg: DictConfig):
         )
     assert len(test_split) > 0, "No 'test' (or 'validation') split found in manifest."
 
+    dynamic_max_len = int(5 * codec.steps_per_second * float(cfg.data.segment_seconds)) + 64
     if cfg.eval.eval_one:
         ex = test_split[0]
         print("[EVAL-ONE] example:")
         print("audio:", ex.get("mix_audio_path", "NA"))
         print("midi :", ex.get("midi_path", "NA"))
+        
         row = _evaluate_example(
             ex,
             model=model,
@@ -740,7 +743,7 @@ def main(cfg: DictConfig):
             spec_cfg=spec_cfg,
             segment_seconds=cfg.data.segment_seconds,
             segment_batch_size=cfg.eval.segment_batch_size,
-            max_decode_len=2048,
+            max_decode_len=dynamic_max_len,
             device=device,
             start_time=cfg.eval.start_time,
             end_time=cfg.eval.end_time,
@@ -763,7 +766,7 @@ def main(cfg: DictConfig):
                 spec_cfg=spec_cfg,
                 segment_seconds=cfg.data.segment_seconds,
                 segment_batch_size=cfg.eval.segment_batch_size,
-                max_decode_len=2048,
+                max_decode_len=dynamic_max_len,
                 device=device,
                 start_time=cfg.eval.start_time,
                 end_time=cfg.eval.end_time,

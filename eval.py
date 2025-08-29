@@ -149,7 +149,7 @@ def _encode_ns_to_tokens(
 def _tie_prefix_from_prev_ns(
     prev_ns: note_seq.NoteSequence, segment_seconds: float, codec
 ) -> list[int]:
-    boundary = float(segment_seconds)   # ← this is the correct boundary
+    boundary = float(segment_seconds)
     active = []
     for n in prev_ns.notes:
         if getattr(n, "is_drum", False):

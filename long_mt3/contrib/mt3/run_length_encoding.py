@@ -73,7 +73,6 @@ def encode_and_index_events(
         Callable[[ES], Sequence[event_codec.Event]]
     ] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Faithful numpy/PyTorch port of MT3 encode_and_index_events."""
 
     indices = np.argsort(event_times, kind="stable")
     event_steps = [round(event_times[i] * codec.steps_per_second) for i in indices]

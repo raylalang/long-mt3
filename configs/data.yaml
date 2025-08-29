@@ -11,7 +11,7 @@ data:
     hop_width: 256
     num_mel_bins: 229
 
-  event_types: []
+  event_types: null
 
   debug: false
   overfit_one: false

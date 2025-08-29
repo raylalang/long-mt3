@@ -39,21 +39,16 @@ def build_codec(
         event_codec.Codec instance defining the vocabulary.
     """
     if event_types is None:
-        event_types = ["pitch", "program", "drum", "tie", "velocity"]
+        event_types = ["pitch", "velocity", "tie", "program"] # no drums
 
-    event_ranges = [
-        event_codec.EventRange(
-            "pitch", note_seq.MIN_MIDI_PITCH, note_seq.MAX_MIDI_PITCH
-        ),
-        event_codec.EventRange("velocity", 0, config.num_velocity_bins),
-        event_codec.EventRange("tie", 0, 0),
-        event_codec.EventRange(
-            "program", note_seq.MIN_MIDI_PROGRAM, note_seq.MAX_MIDI_PROGRAM
-        ),
-        event_codec.EventRange(
-            "drum", note_seq.MIN_MIDI_PITCH, note_seq.MAX_MIDI_PITCH
-        ),
-    ]
+    ranges_all = {
+        "pitch":   event_codec.EventRange("pitch", note_seq.MIN_MIDI_PITCH, note_seq.MAX_MIDI_PITCH),
+        "velocity":event_codec.EventRange("velocity", 0, config.num_velocity_bins),
+        "tie":     event_codec.EventRange("tie", 0, 0),
+        "program": event_codec.EventRange("program", note_seq.MIN_MIDI_PROGRAM, note_seq.MAX_MIDI_PROGRAM),
+        "drum":    event_codec.EventRange("drum", note_seq.MIN_MIDI_PITCH, note_seq.MAX_MIDI_PITCH),
+    }
+    event_ranges = [ranges_all[t] for t in event_types]
 
     return event_codec.Codec(
         max_shift_steps=int(config.steps_per_second * config.max_shift_seconds),

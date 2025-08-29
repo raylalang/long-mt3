@@ -291,10 +291,19 @@ class MT3Dataset(Dataset):
         rle_fn = run_length_encode_shifts_fn(self.codec)
         features = {"targets": events}
         features = rle_fn(features)
+        # Filter state-change types to only those actually present in the codec
+        state_types = []
+        for t in ("velocity", "program", "drum"):
+            try:
+                self.codec.event_type_range(t)
+                state_types.append(t)
+            except ValueError:
+                pass
+
         dedup = remove_redundant_state_changes_fn(
             codec=self.codec,
             feature_key="targets",
-            state_change_event_types=("velocity", "program", "drum"),
+            state_change_event_types=state_types,
         )
         features = dedup(features)
         events = features["targets"]
@@ -423,10 +432,6 @@ class MT3Dataset(Dataset):
                 m.start_time = max(0.0, n.start_time - start_time)
                 m.end_time = max(0.0, n.end_time - start_time)
         
-        # Build onsetoffset events
-        # event_times, event_values = note_sequence_to_onsets_and_offsets_and_programs(
-        #     seg
-        # )
         event_times, event_values = note_sequence_to_onsets_and_offsets(seg)
         return event_times, event_values
 

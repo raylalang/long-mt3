@@ -1,8 +1,13 @@
 train:
-  learning_rate: 1e-3
-  max_epochs: 50
-  early_stop_patience: 10
+  learning_rate: 2e-4
+  max_epochs: 100
+  early_stop_patience: -1
   precision: "16-mixed"
+
+  label_smoothing: 0.0
+  allow_drums: false
+  allowed_programs: null
+  shift_loss_weight: 0.1
 
   accelerator: gpu
   devices: 1

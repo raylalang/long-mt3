@@ -91,36 +91,54 @@ def _decode_tokens_to_ns(all_tokens, codec) -> note_seq.NoteSequence:
         decode_event_fn=NoteEncodingWithTiesSpec.decode_event_fn,
     )
     res = NoteEncodingWithTiesSpec.flush_decoding_state_fn(state)
-    return res["sequence"]
+    return res
 
 
 def _encode_ns_to_tokens(
     ns: note_seq.NoteSequence, codec, window_seconds: float
 ) -> list[int]:
-    event_times = [note.start_time for note in ns.notes]
+    # Gather note events (times + values)
+    event_times = [float(note.start_time) for note in ns.notes]
     event_values = [
         NoteEventData(
-            pitch=note.pitch,
-            velocity=note.velocity,
-            program=note.program,
-            is_drum=note.is_drum,
+            pitch=int(note.pitch),
+            velocity=int(note.velocity),
+            program=int(getattr(note, "program", 0) or 0),
+            is_drum=bool(getattr(note, "is_drum", False)),
         )
         for note in ns.notes
     ]
-    steps_per_second = codec.steps_per_second
-    num_steps = int(window_seconds * steps_per_second)
+
+    # Frame times for the window, matching the codec's step rate
+    steps_per_second = float(codec.steps_per_second)
+    num_steps = int(round(window_seconds * steps_per_second))
+    # ensure at least one frame so we don’t pass an empty list
+    num_steps = max(1, num_steps)
     frame_times = [i / steps_per_second for i in range(num_steps)]
-    state = NoteEncodingState()
-    NoteEncodingWithTiesSpec.begin_encoding_segment_fn(state)
-    rle_fn = run_length_encode_shifts_fn(codec)
-    features = dict(
-        codec=codec,
-        onsets=event_times,
-        event_values=event_values,
-        frame_times=frame_times,
+
+    # Initialize encoding state per your NoteEncodingWithTiesSpec
+    state = NoteEncodingWithTiesSpec.init_encoding_state_fn()
+
+    # Encode + index with the exact API your module defines
+    events, event_start_indices, event_end_indices, state_events, state_event_indices = (
+        encode_and_index_events(
+            state=state,
+            event_times=event_times,
+            event_values=event_values,
+            encode_event_fn=NoteEncodingWithTiesSpec.encode_event_fn,
+            codec=codec,
+            frame_times=frame_times,
+            encoding_state_to_events_fn=NoteEncodingWithTiesSpec.encoding_state_to_events_fn,
+        )
     )
-    features = rle_fn(features)
+
+    # Run-length encode shifts using your helper (expects features["targets"])
+    rle = run_length_encode_shifts_fn(codec)
+    features = {"targets": events}
+    features = rle(features)
     events = features["targets"]
+
+    # Cap length and append EOS
     if len(events) >= MAX_LEN:
         events = events[: MAX_LEN - 1]
     base_ids = [int(e) + NUM_SPECIAL_TOKENS for e in events]
@@ -139,18 +157,13 @@ def _tie_prefix_from_prev_ns(
         if n.start_time <= boundary and n.end_time > boundary:
             active.append(n)
     state = NoteEncodingState()
-    NoteEncodingWithTiesSpec.begin_encoding_segment_fn(state)
     for n in active:
-        ev = NoteEventData(
-            pitch=n.pitch,
-            velocity=0,
-            program=n.program,
-            is_drum=n.is_drum,
-        )
-        # Spec helper to register tied events for this segment
-        NoteEncodingWithTiesSpec.add_tied_event_fn(state, ev)
-    tie_events = note_encoding_state_to_events(state)
-    tie_ids = [int(codec.encode_event(e)) + NUM_SPECIAL_TOKENS for e in tie_events]
+        if getattr(n, "is_drum", False):
+            continue
+        prog = int(getattr(n, "program", 0) or 0)
+        state.active_pitches[(int(n.pitch), prog)] = 1
+    tie_events = note_encoding_state_to_events(state)  # -> [program, pitch, ..., tie]
+    tie_ids = [int(codec.encode_event(ev)) + NUM_SPECIAL_TOKENS for ev in tie_events]
     return tie_ids
 
 
@@ -179,9 +192,12 @@ def _sequential_decode_with_ties(
     device: torch.device,
     max_len: int,
     segment_seconds: float,
+    eval_one: bool = False
 ) -> list[list[int]]:
     preds: list[list[int]] = []
     prev_ns: note_seq.NoteSequence = note_seq.NoteSequence()
+    if eval_one:
+        pbar = tqdm(total=len(segments), desc="segments", dynamic_ncols=True, leave=False)
     for si, seg in enumerate(segments):
         prefix = _tie_prefix_from_prev_ns(prev_ns, segment_seconds, codec)
         toks = _decode_one_with_prefix(
@@ -194,6 +210,10 @@ def _sequential_decode_with_ties(
         preds.append(toks)
         seg_ns = _decode_tokens_to_ns(toks, codec)
         prev_ns = seg_ns
+        if eval_one:
+            pbar.update(1)
+    if eval_one:
+        pbar.close()
     return preds
 
 
@@ -447,6 +467,7 @@ def _evaluate_example(
         device=device,
         max_len=max_decode_len,
         segment_seconds=segment_seconds,
+        eval_one=eval_one
     )
 
     flat_tokens: List[int] = []
@@ -458,52 +479,65 @@ def _evaluate_example(
         flat_tokens.append(EOS_TOKEN)
 
     est_ns = _decode_tokens_to_ns(flat_tokens, codec)
+    gt_full = note_seq.midi_file_to_note_sequence(example["midi_path"])
+    gt_crop = _crop_ns_to_window(gt_full, start_time, end_time)
+    window_seconds = float(audio.numel()) / float(sr)
+    gt_tokens = _encode_ns_to_tokens(gt_crop, codec, window_seconds=window_seconds)
 
     # auxiliary loss evaluation on the evaluation window
     aux_logs = {}
     with torch.no_grad():
-        # encoder embeddings for the full window
-        spec_tensor = torch.tensor(
-            spec[None, ...], dtype=torch.float32, device=device
-        )  # [1, T, f]
+        # encoder embeddings for the full window (chunked to respect PE length)
+        spec_tensor = torch.tensor(spec[None, ...], dtype=torch.float32, device=device)  # [1, T, F]
         feat = (
             model.model.frontend(spec_tensor)
             if getattr(model.model, "frontend", None) is not None
             else spec_tensor
-        )
-        memory = model.model.encoder(feat)  # [1, T, D]
+        )  # [1, T, F’]
+
+        # figure out the max length the encoder's pos-encoder supports
+        pe = getattr(model.model, "pos_encoder", None)
+        pe_max_len = None
+        if pe is not None and hasattr(pe, "pe"):
+            pe_max_len = int(pe.pe.size(1))  # e.g., 2048
+
+        if pe_max_len is None or feat.size(1) <= pe_max_len:
+            # no need to chunk
+            memory = model.model.encoder(feat)  # [1, T, D]
+        else:
+            # chunk along time, encode each slice, then concat
+            T = feat.size(1)
+            chunks = []
+            for s in range(0, T, pe_max_len):
+                e = min(T, s + pe_max_len)
+                chunks.append(model.model.encoder(feat[:, s:e]))  # [1, e-s, D]
+            memory = torch.cat(chunks, dim=1)  # [1, T, D]
 
         # build frame labels from GT crop at eval FPS to match spectrogram T
         sr = spec_cfg.sample_rate
         hop = spec_cfg.hop_width
         fps_eval = float(sr) / float(hop)
 
-        # frame labels: [T, 88]
         def _frame_labels_eval(ns_local):
             T = spec.shape[0]
             y = torch.zeros(T, 88, dtype=torch.float32, device=device)
             for n in ns_local.notes:
                 p = int(n.pitch) - 21
-                if p < 0 or p >= 88:
-                    continue
-                s = int(max(0, round(n.start_time * fps_eval)))
-                e = int(min(T, round(n.end_time * fps_eval)))
-                if e > s:
-                    y[s:e, p] = 1.0
+                if 0 <= p < 88:
+                    s = int(max(0, round(n.start_time * fps_eval)))
+                    e = int(min(T, round(n.end_time * fps_eval)))
+                    if e > s:
+                        y[s:e, p] = 1.0
             return y
 
-        fl_eval = _frame_labels_eval(gt_crop)  # [T,88]
+        fl_eval = _frame_labels_eval(gt_crop)  # [T, 88]
 
         beat_bounds_eval = None
         beat_targets_eval = None
-        if model.model.fusion is not None:
+        if getattr(model.model, "fusion", None) is not None:
             # derive beats from GT window
             def _estimate_qpm_eval(ns_local, default_qpm=120.0):
-                if (
-                    hasattr(ns_local, "tempos")
-                    and len(ns_local.tempos) > 0
-                    and ns_local.tempos[0].qpm > 0
-                ):
+                if hasattr(ns_local, "tempos") and len(ns_local.tempos) > 0 and ns_local.tempos[0].qpm > 0:
                     return float(ns_local.tempos[0].qpm)
                 return float(default_qpm)
 
@@ -514,8 +548,7 @@ def _evaluate_example(
             starts = [i * beat_period for i in range(M)]
             ends = [min(window_seconds, (i + 1) * beat_period) for i in range(M)]
             bounds = torch.zeros(1, M, 2, dtype=torch.long, device=device)
-            centers = []
-            durs = []
+            centers, durs = [], []
             for i in range(M):
                 s = int(max(0, round(starts[i] * fps_eval)))
                 e = int(min(spec.shape[0], round(ends[i] * fps_eval)))
@@ -525,7 +558,6 @@ def _evaluate_example(
                 bounds[0, i, 1] = e
                 centers.append((starts[i] + ends[i]) * 0.5)
                 durs.append(max(1e-6, ends[i] - starts[i]))
-            # targets from GT onsets
             onsets = [float(n.start_time) for n in gt_crop.notes]
             targets = torch.zeros(1, M, dtype=torch.float32, device=device)
             for i in range(M):
@@ -535,19 +567,20 @@ def _evaluate_example(
                 if local:
                     vals = [max(-0.5, min(0.5, (t - cs) / dur)) for t in local]
                     targets[0, i] = float(np.mean(vals))
-            beat_bounds_eval = bounds  # [1,M,2]
-            beat_targets_eval = targets  # [1,M]
+            beat_bounds_eval = bounds
+            beat_targets_eval = targets
 
-            # fusion forward to get beat embeddings
+            # fusion forward to get beat embeddings (memory already full-length)
             memory, beat_emb, _ = model.model.fusion(
                 frame_emb=memory,
                 beat_bounds=bounds[0],
                 beats_per_bar=model.model.beats_per_bar,
                 frame_mask=None,
             )
+
         # heads and losses
-        if hasattr(model.model, "frame_head") and model.model.frame_head is not None:
-            frame_logits = model.model.frame_head(memory)  # [1,T,88]
+        if getattr(model.model, "frame_head", None) is not None:
+            frame_logits = model.model.frame_head(memory)  # [1, T, 88]
             if fl_eval is not None:
                 bce = torch.nn.functional.binary_cross_entropy_with_logits(
                     frame_logits, fl_eval.unsqueeze(0)
@@ -557,16 +590,16 @@ def _evaluate_example(
 
         if (
             beat_bounds_eval is not None
-            and hasattr(model.model, "beat_head")
-            and model.model.beat_head is not None
+            and getattr(model.model, "beat_head", None) is not None
         ):
-            beat_pred = model.model.beat_head(beat_emb)  # [1,M,1] or [1,M]
+            beat_pred = model.model.beat_head(beat_emb)  # [1, M, 1] or [1, M]
             if beat_pred.dim() == 3 and beat_pred.size(-1) == 1:
                 beat_pred = beat_pred.squeeze(-1)
             if beat_targets_eval is not None:
                 l1 = torch.nn.functional.l1_loss(beat_pred, beat_targets_eval)
                 aux_logs["eval_beat_l1"] = float(l1.item())
             aux_logs["beat_pred_shape"] = tuple(beat_pred.shape)
+
 
     if save_midi_dir:
         os.makedirs(save_midi_dir, exist_ok=True)
@@ -577,22 +610,16 @@ def _evaluate_example(
         mid_name = os.path.join(save_midi_dir, f"pred_{mid_base}.mid")
         note_seq.sequence_proto_to_midi_file(est_ns, mid_name)
 
-    gt_full = note_seq.midi_file_to_note_sequence(example["midi_path"])
-    gt_crop = _crop_ns_to_window(gt_full, start_time, end_time)
-
-    window_seconds = float(audio.numel()) / float(sr)
-    gt_tokens = _encode_ns_to_tokens(gt_crop, codec, window_seconds=window_seconds)
-
     if eval_one:
-        print("[DIAG] pred types:", _type_counts(flat_tokens, codec))
-        print("[DIAG] gt types:", _type_counts(gt_tokens, codec))
-        _debug_token_snippets("Eval Pred (head)", flat_tokens, codec, 0, 32)
+        print("[DEBUG] pred types:", _type_counts(flat_tokens, codec))
+        print("[DEBUG] gt types:", _type_counts(gt_tokens, codec))
+        _debug_token_snippets("[DEBUG] Eval Pred (head)", flat_tokens, codec, 0, 32)
         _debug_token_snippets(
-            "Eval Pred (tail)", flat_tokens, codec, max(0, len(flat_tokens) - 32), 32
+            "[DEBUG] Eval Pred (tail)", flat_tokens, codec, max(0, len(flat_tokens) - 32), 32
         )
-        _debug_token_snippets("Eval GT   (head)", gt_tokens, codec, 0, 32)
+        _debug_token_snippets("[DEBUG] Eval GT (head)", gt_tokens, codec, 0, 32)
         _debug_token_snippets(
-            "Eval GT   (tail)", gt_tokens, codec, max(0, len(gt_tokens) - 32), 32
+            "[DEBUG] Eval GT (tail)", gt_tokens, codec, max(0, len(gt_tokens) - 32), 32
         )
 
     is_drum = False
@@ -611,6 +638,8 @@ def _evaluate_example(
     row = {
         "id": example.get("unique_id", example.get("midi_path", "unknown")),
         "dataset": example.get("dataset", "unknown"),
+        "mix_audio_path": example.get("mix_audio_path", ""),
+        "midi_path": example.get("midi_path", ""),
         "num_tokens": len(flat_tokens),
         "frame_precision": float(p),
         "frame_recall": float(r),
@@ -632,17 +661,17 @@ def main(cfg: DictConfig):
     codec = build_codec(vocab_cfg, event_types=cfg.data.event_types)
     spec_cfg = SpectrogramConfig(**cfg.data.spectrogram_config)
 
-    ckpt_path = cfg.train.resume_from_checkpoint
-    assert ckpt_path and os.path.exists(ckpt_path), f"Missing checkpoint: {ckpt_path}"
-    device = _resolve_device(cfg.train.accelerator, cfg.train.devices)
+    checkpoint = cfg.eval.checkpoint
+    assert checkpoint and os.path.exists(checkpoint), f"Missing checkpoint: {checkpoint}"
+    device = _resolve_device(cfg.eval.accelerator, cfg.eval.devices)
 
     model = MT3Trainer.load_from_checkpoint(
-        ckpt_path, map_location=device, strict=False
+        checkpoint, map_location=device, strict=False
     )
     model.eval()
     model.to(device)
 
-    version_dir = os.path.abspath(os.path.join(os.path.dirname(ckpt_path), ".."))
+    version_dir = os.path.abspath(os.path.join(os.path.dirname(checkpoint), ".."))
     out_dir = os.path.join(version_dir, "eval_one" if cfg.eval.eval_one else "eval")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -663,6 +692,10 @@ def main(cfg: DictConfig):
 
     if cfg.eval.eval_one:
         ex = test_split[0]
+        print("[EVAL-ONE] example:")
+        print("id   :", ex.get("unique_id", "NA"))
+        print("audio:", ex.get("mix_audio_path", "NA"))
+        print("midi :", ex.get("midi_path", "NA"))
         row = _evaluate_example(
             ex,
             model=model,

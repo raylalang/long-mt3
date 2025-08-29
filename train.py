@@ -29,7 +29,8 @@ torch.backends.cudnn.benchmark = True
 
 class MT3Trainer(pl.LightningModule):
     def __init__(self, model_config, codec, learning_rate,
-                 label_smoothing=0.0, debug=False):
+                 label_smoothing=0.0, allow_drums=False,
+                 allowed_programs=None, shift_loss_weight=0.1, debug=False):
         super().__init__()
         self.save_hyperparameters()
         self.model = MT3Model(**model_config)
@@ -38,9 +39,20 @@ class MT3Trainer(pl.LightningModule):
 
         # Precompute vocab-id sets per event type and a small transition table
         def _ids(event_type: str) -> set[int]:
-            lo, hi = self.codec.event_type_range(event_type)
+            try:
+                lo, hi = self.codec.event_type_range(event_type)
+            except ValueError:
+                return set()
+            # vocab ids are offset by NUM_SPECIAL_TOKENS
             return set(range(lo + NUM_SPECIAL_TOKENS, hi + NUM_SPECIAL_TOKENS + 1))
 
+        def _has(event_type: str) -> bool:
+            try:
+                _ = self.codec.event_type_range(event_type)
+                return True
+            except ValueError:
+                return False
+        
         self.SHIFT_IDS = _ids("shift")
         self.PITCH_IDS = _ids("pitch")
         self.VEL_IDS = _ids("velocity")
@@ -58,15 +70,32 @@ class MT3Trainer(pl.LightningModule):
             | self.PROG_IDS
             | self.DRUM_IDS
         )
+        if (not self.hparams.allow_drums) and _has("drum"):
+            # hard-disable DRUM ids everywhere
+            self.DRUM_IDS = set()
+       
+        # Optional program whitelist (absolute vocab ids)
+        self.allowed_program_ids = set(allowed_programs or [])
+        if len(self.allowed_program_ids) > 0 and len(self.PROG_IDS) > 0:
+            # keep only whitelisted program ids; forbid the rest
+            self.PROG_FORBID = sorted(list(self.PROG_IDS - self.allowed_program_ids))
+        else:
+            self.PROG_FORBID = []
+
+        # Build transition table
         self.ALLOW = {
             "program": self.VEL_IDS,
             "velocity": self.PITCH_IDS | self.DRUM_IDS,
-            "pitch": self.PROG_IDS | self.VEL_IDS | self.SHIFT_IDS,  # removed TIE_IDS
-            "drum": self.PROG_IDS | self.VEL_IDS | self.SHIFT_IDS,  # removed TIE_IDS
+            "pitch": self.PROG_IDS | self.VEL_IDS | self.SHIFT_IDS,
+            "drum": self.PROG_IDS | self.VEL_IDS | self.SHIFT_IDS,
             "shift": self.PROG_IDS | self.VEL_IDS | self.PITCH_IDS | self.DRUM_IDS,
             "tie": self.PROG_IDS | self.VEL_IDS | self.PITCH_IDS | self.DRUM_IDS,
             None: self.ALL_EVENT_IDS,
         }
+        if not self.hparams.allow_drums:
+            # strip drums from every transition
+            for k in list(self.ALLOW.keys()):
+                self.ALLOW[k] = self.ALLOW[k] - self.DRUM_IDS
 
         min_idx, max_idx = self.codec.event_type_range("shift")
         vocab_dim = self.model.decoder.out_proj.out_features
@@ -75,7 +104,19 @@ class MT3Trainer(pl.LightningModule):
         mask[shift_ids] = True
         self.register_buffer("shift_id_mask", mask, persistent=False)
 
-        self.shift_loss_weight = getattr(self.hparams, "shift_loss_weight", 0.2)
+        self.shift_loss_weight = float(self.hparams.shift_loss_weight)
+
+        # Precompute train-time forbidden token indices (logit mask)
+        forbid_ids: list[int] = []
+        if (not self.hparams.allow_drums) and len(self.DRUM_IDS) > 0:
+            forbid_ids.extend(sorted(list(self.DRUM_IDS)))
+        if len(self.PROG_FORBID) > 0:
+            forbid_ids.extend(self.PROG_FORBID)
+        self.register_buffer(
+            "forbid_idx",
+            torch.tensor(forbid_ids, dtype=torch.long),
+            persistent=False,
+        )
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN, label_smoothing=label_smoothing)
 
@@ -121,7 +162,8 @@ class MT3Trainer(pl.LightningModule):
             eos_id = EOS_TOKEN
             cumsums = (targets == eos_id).cumsum(dim=1)
             keep = (cumsums <= 1) & (targets != PAD_TOKEN)
-            # loss = (ce[keep]).mean()
+            if self.forbid_idx.numel() > 0:
+                logits_flat.index_fill_(1, self.forbid_idx, float("-inf"))
             weights = torch.ones_like(ce)
             weights = torch.where(self.shift_id_mask[targets], self.shift_loss_weight * weights, weights)
             loss = ( (ce * weights)[keep] ).sum() / (weights[keep].sum().clamp_min(1))
@@ -215,7 +257,8 @@ class MT3Trainer(pl.LightningModule):
             eos_id = EOS_TOKEN
             cumsums = (targets == eos_id).cumsum(dim=1)
             keep = (cumsums <= 1) & (targets != PAD_TOKEN)
-            # loss = (ce[keep]).mean()
+            if self.forbid_idx.numel() > 0:
+                logits_flat.index_fill_(1, self.forbid_idx, float("-inf"))
             weights = torch.ones_like(ce)
             weights = torch.where(self.shift_id_mask[targets], self.shift_loss_weight * weights, weights)
             loss = ( (ce * weights)[keep] ).sum() / (weights[keep].sum().clamp_min(1))
@@ -249,7 +292,7 @@ class MT3Trainer(pl.LightningModule):
             prefix = batch.get("decoder_input_ids")
             if prefix is not None and prefix.size(0) > 0 and prefix.size(1) > 0:
                 full = prefix[0].tolist()
-                prefix_ids = full[: max(1, min(2, len(full)))]  # use 1–2 tokens
+                prefix_ids = full[: max(1, min(6, len(full)))]
                 was_training = self.training
                 self.eval()
                 with torch.no_grad():
@@ -450,6 +493,9 @@ def main(cfg: DictConfig):
         codec=codec,
         learning_rate=cfg.train.learning_rate,
         label_smoothing=cfg.train.get("label_smoothing", 0.0),
+        allow_drums=cfg.train.get("allow_drums", False),
+        allowed_programs=cfg.train.get("allowed_programs", None),
+        shift_loss_weight=cfg.train.get("shift_loss_weight", 0.1),
         debug=cfg.train.debug,
     )
     # model = torch.compile(model)

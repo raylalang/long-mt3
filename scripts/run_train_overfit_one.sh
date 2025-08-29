@@ -22,7 +22,7 @@ CUDA_VISIBLE_DEVICES=4 python3 train.py \
   train.accelerator=gpu \
   train.devices=1 \
   train.precision=32 \
-  train.early_stop_patience=-10 \
+  train.early_stop_patience=-1 \
   train.debug=true \
   train.tb_logger=true
 

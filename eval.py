@@ -149,7 +149,7 @@ def _encode_ns_to_tokens(
 def _tie_prefix_from_prev_ns(
     prev_ns: note_seq.NoteSequence, segment_seconds: float, codec
 ) -> list[int]:
-    boundary = segment_seconds
+    boundary = float(segment_seconds)   # ← this is the correct boundary
     active = []
     for n in prev_ns.notes:
         if getattr(n, "is_drum", False):
@@ -162,7 +162,7 @@ def _tie_prefix_from_prev_ns(
             continue
         prog = int(getattr(n, "program", 0) or 0)
         state.active_pitches[(int(n.pitch), prog)] = 1
-    tie_events = note_encoding_state_to_events(state)  # -> [program, pitch, ..., tie]
+    tie_events = note_encoding_state_to_events(state)
     tie_ids = [int(codec.encode_event(ev)) + NUM_SPECIAL_TOKENS for ev in tie_events]
     return tie_ids
 
@@ -207,6 +207,9 @@ def _sequential_decode_with_ties(
             max_len=max_len,
             prefix_ids=prefix,
         )
+        if EOS_TOKEN not in toks and len(toks) >= max_len:
+            print(f"[WARN] no EOS, hit max_len on segment {si} (len={len(toks)})", flush=True)
+
         preds.append(toks)
         seg_ns = _decode_tokens_to_ns(toks, codec)
         prev_ns = seg_ns
@@ -214,6 +217,13 @@ def _sequential_decode_with_ties(
             pbar.update(1)
     if eval_one:
         pbar.close()
+
+    total_len = sum(len(t) for t in preds)
+    eos_hits = sum(1 for t in preds if EOS_TOKEN in t)
+    max_hit  = sum(1 for t in preds if (EOS_TOKEN not in t and len(t) >= max_len))
+    avg_len  = total_len / max(1, len(preds))
+    print(f"[DEBUG] seg_summary: n={len(preds)} avg_len={avg_len:.1f} eos%={100.0*eos_hits/max(1,len(preds)):.1f} maxcap%={100.0*max_hit/max(1,len(preds)):.1f}", flush=True)
+
     return preds
 
 
@@ -284,22 +294,29 @@ def _segments_tokens_to_ns(
     codec,
 ) -> note_seq.NoteSequence:
     combined = note_seq.NoteSequence()
-    prev_ns = note_seq.NoteSequence()
+    prev_ns = note_seq.NoteSequence() 
+
     for si, seg_tokens in enumerate(token_segments):
-        # Recreate the tie prefix
+        # Build tie prefix from the previous segment's LOCAL timeline.
+        # Boundary is always the segment length in that local frame.
         tie_ids = _tie_prefix_from_prev_ns(prev_ns, segment_seconds, codec) if si > 0 else []
+
+        # Decode this segment LOCALLY at t=0 so ties are computed correctly.
         toks_for_decode = tie_ids + seg_tokens
-        # Decode this segment at its absolute offset
-        seg_ns = _decode_tokens_to_ns(
-            toks_for_decode, codec, start_time=si * float(segment_seconds)
-        )
-        # Append notes into combined
-        for n in seg_ns.notes:
+        seg_local = _decode_tokens_to_ns(toks_for_decode, codec, start_time=0.0)
+
+        # When merging, place it at its ABSOLUTE offset.
+        abs_start = si * float(segment_seconds)
+        for n in seg_local.notes:
             m = combined.notes.add()
             m.CopyFrom(n)
-        combined.total_time = max(combined.total_time, seg_ns.total_time)
-        # Keep only this segment’s content as the new “previous” for the next boundary
-        prev_ns = seg_ns
+            m.start_time = n.start_time + abs_start
+            m.end_time   = n.end_time   + abs_start
+        combined.total_time = max(combined.total_time, seg_local.total_time + abs_start)
+
+        # For the next iteration, keep the LOCAL (t=0) decode as the previous segment.
+        prev_ns = seg_local
+
     return combined
 
 
@@ -459,6 +476,17 @@ def _type_counts(ids: list[int], codec) -> dict[str, int]:
             c[ev.type] += 1
     return dict(c)
 
+def _shift_vals(ids, codec):
+    vals = []
+    for t in ids:
+        if t >= NUM_SPECIAL_TOKENS:
+            ev = codec.decode_event_index(t - NUM_SPECIAL_TOKENS)
+            if ev.type == "shift":
+                vals.append(int(ev.value))
+    if not vals:
+        return 0, 0.0, 0.0
+    import numpy as np
+    return len(vals), float(np.mean(vals)), float(np.median(vals))
 
 def _evaluate_example(
     example: Dict[str, Any],
@@ -483,8 +511,16 @@ def _evaluate_example(
         example["mix_audio_path"], sr, start_time=start_time, end_time=end_time
     )
     spec = compute_spectrogram(audio.numpy(), spec_cfg)
-
     segs = _segments_from_spec(spec, seg_frames)
+
+    print("[DEBUG] sr", sr,
+        "hop", hop,
+        "fps", fps,
+        "steps/s", codec.steps_per_second,
+        "segment_seconds", segment_seconds,
+        "seg_frames", seg_frames,
+        "spec_T", spec.shape[0],
+        flush=True)
 
     pred_token_segments = _sequential_decode_with_ties(
         model=model,
@@ -504,6 +540,15 @@ def _evaluate_example(
     gt_crop = _crop_ns_to_window(gt_full, start_time, end_time)
     window_seconds = float(audio.numel()) / float(sr)
     gt_tokens = _encode_ns_to_tokens(gt_crop, codec, window_seconds=window_seconds)
+    print("[DEBUG] est_total_time_before_crop", float(est_ns.total_time), flush=True)
+    est_ns = _crop_ns_to_window(est_ns, 0.0, window_seconds)
+
+    print("[DEBUG] gt_notes", len(gt_crop.notes),
+      "est_notes", len(est_ns.notes),
+      "window_seconds", window_seconds,
+      flush=True)
+    print("[DEBUG] gt first onsets:", sorted([float(n.start_time) for n in gt_crop.notes])[:10], flush=True)
+    print("[DEBUG] est first onsets:", sorted([float(n.start_time) for n in est_ns.notes])[:10], flush=True)
 
     # auxiliary loss evaluation on the evaluation window
     aux_logs = {}
@@ -655,6 +700,11 @@ def _evaluate_example(
             "[DEBUG] Eval GT (tail)", gt_tokens, codec, max(0, len(gt_tokens) - 32), 32
         )
 
+        pred_shift_n, pred_shift_mean, pred_shift_med = _shift_vals(flat_tokens, codec)
+        gt_shift_n,   gt_shift_mean,   gt_shift_med   = _shift_vals(gt_tokens, codec)
+        print(f"[DEBUG] shifts pred n/mean/median: {pred_shift_n}/{pred_shift_mean:.2f}/{pred_shift_med:.2f}", flush=True)
+        print(f"[DEBUG] shifts  gt  n/mean/median: {gt_shift_n}/{gt_shift_mean:.2f}/{gt_shift_med:.2f}", flush=True)
+
     is_drum = False
     ref_roll = get_prettymidi_pianoroll(gt_crop, fps=fps, is_drum=is_drum)
     est_roll = get_prettymidi_pianoroll(est_ns, fps=fps, is_drum=is_drum)
@@ -672,7 +722,7 @@ def _evaluate_example(
         "dataset": example.get("dataset", "unknown"),
         "mix_audio_path": example.get("mix_audio_path", ""),
         "midi_path": example.get("midi_path", ""),
-        "num_tokens": len(flat_tokens),
+        "num_tokens": sum(len(s) for s in pred_token_segments),
         "frame_precision": float(p),
         "frame_recall": float(r),
         "frame_f1": float(f1),
@@ -705,6 +755,25 @@ def main(cfg: DictConfig):
 
     codec = model.codec
 
+    try:
+        shift_vals = []
+        for i in range(codec.num_classes):
+            ev = codec.decode_event_index(i)
+            if getattr(ev, "type", None) == "shift":
+                shift_vals.append(int(ev.value))
+        if shift_vals:
+            mn, mx = min(shift_vals), max(shift_vals)
+            print(
+                f"[DEBUG] shift_value_range: min={mn} max={mx} count={len(shift_vals)} "
+                f"| steps_per_second={codec.steps_per_second} "
+                f"| seconds_range=[{mn/codec.steps_per_second:.3f}, {mx/codec.steps_per_second:.3f}]",
+                flush=True,
+            )
+        else:
+            print("[DEBUG] shift_value_range: no 'shift' events found in codec", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] shift_value_range: failed to enumerate ({e})", flush=True)
+
     v_proj = model.model.decoder.out_proj.out_features
     expected = codec.num_classes + NUM_SPECIAL_TOKENS
     print(f"[DEBUG] decoder_out={v_proj}, codec.num_classes={codec.num_classes}, specials={NUM_SPECIAL_TOKENS}")
@@ -730,6 +799,8 @@ def main(cfg: DictConfig):
     assert len(test_split) > 0, "No 'test' (or 'validation') split found in manifest."
 
     dynamic_max_len = int(5 * codec.steps_per_second * float(cfg.data.segment_seconds)) + 64
+    print(f"[DEBUG] dynamic_max_len={dynamic_max_len}", flush=True)
+
     if cfg.eval.eval_one:
         ex = test_split[0]
         print("[EVAL-ONE] example:")
@@ -757,6 +828,7 @@ def main(cfg: DictConfig):
         return
 
     rows: List[Dict[str, Any]] = []
+    pbar = tqdm(total=len(test_split), desc="test samples", dynamic_ncols=True, leave=False)
     for ex in test_split:
         rows.append(
             _evaluate_example(
@@ -774,6 +846,8 @@ def main(cfg: DictConfig):
                 eval_one=cfg.eval.eval_one,
             )
         )
+        pbar.update(1)
+    pbar.close()
 
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(out_dir, "results.csv"), index=False)

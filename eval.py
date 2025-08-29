@@ -74,7 +74,7 @@ def _segments_from_spec(spec: np.ndarray, segment_frames: int) -> List[np.ndarra
     return segs
 
 
-def _decode_tokens_to_ns(all_tokens, codec) -> note_seq.NoteSequence:
+def _decode_tokens_to_ns(all_tokens, codec, start_time: float = 0.0) -> note_seq.NoteSequence:
     event_tokens = [
         t - NUM_SPECIAL_TOKENS for t in all_tokens if t >= NUM_SPECIAL_TOKENS
     ]
@@ -85,7 +85,7 @@ def _decode_tokens_to_ns(all_tokens, codec) -> note_seq.NoteSequence:
     decode_events(
         state=state,
         tokens=np.asarray(event_tokens, dtype=np.int32),
-        start_time=0.0,
+        start_time=start_time,
         max_time=None,
         codec=codec,
         decode_event_fn=NoteEncodingWithTiesSpec.decode_event_fn,
@@ -276,6 +276,31 @@ def _ns_to_note_arrays(ns, pitch_min=None, pitch_max=None):
         off.append(e)
         pc.append(int(n.pitch))
     return np.asarray(on), np.asarray(off), np.asarray(pc)
+
+
+def _segments_tokens_to_ns(
+    token_segments: Sequence[list[int]],
+    segment_seconds: float,
+    codec,
+) -> note_seq.NoteSequence:
+    combined = note_seq.NoteSequence()
+    prev_ns = note_seq.NoteSequence()
+    for si, seg_tokens in enumerate(token_segments):
+        # Recreate the tie prefix (same logic you used for generation)
+        tie_ids = _tie_prefix_from_prev_ns(prev_ns, segment_seconds, codec) if si > 0 else []
+        toks_for_decode = tie_ids + seg_tokens
+        # Decode this segment at its absolute offset
+        seg_ns = _decode_tokens_to_ns(
+            toks_for_decode, codec, start_time=si * float(segment_seconds)
+        )
+        # Append notes into combined
+        for n in seg_ns.notes:
+            m = combined.notes.add()
+            m.CopyFrom(n)
+        combined.total_time = max(combined.total_time, seg_ns.total_time)
+        # Keep only this segment’s content as the new “previous” for the next boundary
+        prev_ns = seg_ns
+    return combined
 
 
 def _greedy_match(
@@ -470,15 +495,10 @@ def _evaluate_example(
         eval_one=eval_one
     )
 
-    flat_tokens: List[int] = []
-    for seg_tokens in pred_token_segments:
-        if flat_tokens and seg_tokens and flat_tokens[-1] == EOS_TOKEN:
-            seg_tokens = [t for t in seg_tokens if t != EOS_TOKEN]
-        flat_tokens.extend(seg_tokens)
-    if not flat_tokens or flat_tokens[-1] != EOS_TOKEN:
-        flat_tokens.append(EOS_TOKEN)
 
-    est_ns = _decode_tokens_to_ns(flat_tokens, codec)
+    est_ns = _segments_tokens_to_ns(
+        pred_token_segments, segment_seconds=segment_seconds, codec=codec
+    )
     gt_full = note_seq.midi_file_to_note_sequence(example["midi_path"])
     gt_crop = _crop_ns_to_window(gt_full, start_time, end_time)
     window_seconds = float(audio.numel()) / float(sr)
@@ -496,10 +516,13 @@ def _evaluate_example(
         )  # [1, T, F’]
 
         # figure out the max length the encoder's pos-encoder supports
-        pe = getattr(model.model, "pos_encoder", None)
+        pe = getattr(getattr(model.model, "encoder", None), "pos_encoder", None)
         pe_max_len = None
-        if pe is not None and hasattr(pe, "pe"):
-            pe_max_len = int(pe.pe.size(1))  # e.g., 2048
+        if pe is not None:
+            if hasattr(pe, "pe"):                   # sinusoidal buffer
+                pe_max_len = int(pe.pe.size(1))     # e.g., 2048
+            elif hasattr(pe, "max_len"):            # future-proof
+                pe_max_len = int(pe.max_len)
 
         if pe_max_len is None or feat.size(1) <= pe_max_len:
             # no need to chunk
@@ -611,6 +634,15 @@ def _evaluate_example(
         note_seq.sequence_proto_to_midi_file(est_ns, mid_name)
 
     if eval_one:
+        flat_tokens: List[int] = []
+        for seg_tokens in pred_token_segments:
+            # avoid stacking multiple EOS when segments are concatenated
+            if flat_tokens and seg_tokens and flat_tokens[-1] == EOS_TOKEN:
+                seg_tokens = [t for t in seg_tokens if t != EOS_TOKEN]
+            flat_tokens.extend(seg_tokens)
+        if not flat_tokens or flat_tokens[-1] != EOS_TOKEN:
+            flat_tokens.append(EOS_TOKEN)
+            
         print("[DEBUG] pred types:", _type_counts(flat_tokens, codec))
         print("[DEBUG] gt types:", _type_counts(gt_tokens, codec))
         _debug_token_snippets("[DEBUG] Eval Pred (head)", flat_tokens, codec, 0, 32)
@@ -636,7 +668,6 @@ def _evaluate_example(
     )
 
     row = {
-        "id": example.get("unique_id", example.get("midi_path", "unknown")),
         "dataset": example.get("dataset", "unknown"),
         "mix_audio_path": example.get("mix_audio_path", ""),
         "midi_path": example.get("midi_path", ""),
@@ -657,8 +688,8 @@ def _evaluate_example(
 
 @hydra.main(config_path="configs", config_name="config", version_base=None)
 def main(cfg: DictConfig):
-    vocab_cfg = VocabularyConfig()
-    codec = build_codec(vocab_cfg, event_types=cfg.data.event_types)
+    # vocab_cfg = VocabularyConfig()
+    # codec = build_codec(vocab_cfg, event_types=cfg.data.event_types)
     spec_cfg = SpectrogramConfig(**cfg.data.spectrogram_config)
 
     checkpoint = cfg.eval.checkpoint
@@ -670,6 +701,13 @@ def main(cfg: DictConfig):
     )
     model.eval()
     model.to(device)
+
+    codec = model.codec
+
+    v_proj = model.model.decoder.out_proj.out_features
+    expected = codec.num_classes + NUM_SPECIAL_TOKENS
+    print(f"[DEBUG] decoder_out={v_proj}, codec.num_classes={codec.num_classes}, specials={NUM_SPECIAL_TOKENS}")
+    assert v_proj == expected, f"Vocab mismatch: decoder_out={v_proj} vs codec_size={expected}"
 
     version_dir = os.path.abspath(os.path.join(os.path.dirname(checkpoint), ".."))
     out_dir = os.path.join(version_dir, "eval_one" if cfg.eval.eval_one else "eval")
@@ -693,7 +731,6 @@ def main(cfg: DictConfig):
     if cfg.eval.eval_one:
         ex = test_split[0]
         print("[EVAL-ONE] example:")
-        print("id   :", ex.get("unique_id", "NA"))
         print("audio:", ex.get("mix_audio_path", "NA"))
         print("midi :", ex.get("midi_path", "NA"))
         row = _evaluate_example(
